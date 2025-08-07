@@ -71,6 +71,7 @@ public class MockRegister extends JFrame {
         }
     }
 
+
 private void initUI() {
     setTitle("Mock Register");
     setSize(500, 500);
@@ -253,6 +254,26 @@ private void finishTransaction() {
     }
 }
 
+=======
+    private void initUI() {
+        setTitle("Mock Register");
+        setSize(400, 400);
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+
+        virtualJournal = new JTextArea();
+        virtualJournal.setEditable(false);
+        
+        finishButton = new JButton("Finish Transaction");
+        finishButton.addActionListener(e -> finishTransaction());
+
+        // Simple layout with just the journal and finish button
+        add(new JScrollPane(virtualJournal), BorderLayout.CENTER);
+        add(finishButton, BorderLayout.SOUTH);
+
+        setVisible(true);
+    }
+
     private boolean loadPriceBook() {
         try (BufferedReader reader = new BufferedReader(new FileReader(PRICE_BOOK_FILE))) {
             String line;
@@ -305,8 +326,6 @@ private void finishTransaction() {
         }
         return input.substring(0, maxLength - 3) + "...";
     }
-
-    
 
     // Item class for price book
     static class Item {
