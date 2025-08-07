@@ -13,7 +13,6 @@ import java.util.Map;
 import javax.swing.Timer;
 
 public class MockRegister extends JFrame {
-    private JTextField scanInput;
     private JTextArea virtualJournal;
     private HashMap<String, Item> priceBook;
     private HashMap<String, Integer> currentTransaction;
@@ -28,6 +27,7 @@ public class MockRegister extends JFrame {
         totalAmount = BigDecimal.ZERO;
         initUI();
         
+        // Global key listener for scan gun input
         Toolkit.getDefaultToolkit().addAWTEventListener(new AWTEventListener() {
             public void eventDispatched(AWTEvent event) {
                 if (event instanceof KeyEvent) {
@@ -35,18 +35,16 @@ public class MockRegister extends JFrame {
                     if (keyEvent.getID() == KeyEvent.KEY_PRESSED) {
                         if (keyEvent.getKeyCode() == KeyEvent.VK_ENTER) {
                             String upc = scanBuffer.toString().trim();
-                            scanBuffer.setLength(0);
+                            scanBuffer.setLength(0); // Clear buffer
                             
                             Item item = priceBook.get(upc);
                             if (item != null) {
                                 currentTransaction.merge(upc, 1, Integer::sum);
                                 totalAmount = totalAmount.add(item.price);
-                                
                                 updateDisplay();
                             } else {
                                 virtualJournal.append(String.format("UPC: %s\nItem not found.\n\n", upc));
                             }
-                            scanInput.setText("");
                         } else {
                             scanBuffer.append(keyEvent.getKeyChar());
                         }
@@ -61,6 +59,25 @@ public class MockRegister extends JFrame {
                 "Price Book Error",
                 JOptionPane.ERROR_MESSAGE);
         }
+    }
+
+    private void initUI() {
+        setTitle("Mock Register");
+        setSize(400, 400);
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setLayout(new BorderLayout());
+
+        virtualJournal = new JTextArea();
+        virtualJournal.setEditable(false);
+        
+        finishButton = new JButton("Finish Transaction");
+        finishButton.addActionListener(e -> finishTransaction());
+
+        // Simple layout with just the journal and finish button
+        add(new JScrollPane(virtualJournal), BorderLayout.CENTER);
+        add(finishButton, BorderLayout.SOUTH);
+
+        setVisible(true);
     }
 
     private boolean loadPriceBook() {
@@ -119,31 +136,6 @@ public class MockRegister extends JFrame {
             timer.setRepeats(false);
             timer.start();
         }
-    }
-
-    private void initUI() {
-        setTitle("Mock Register");
-        setSize(400, 400);
-        setDefaultCloseOperation(EXIT_ON_CLOSE);
-        setLayout(new BorderLayout());
-
-        scanInput = new JTextField();
-        virtualJournal = new JTextArea();
-        virtualJournal.setEditable(false);
-
-        JLabel scanLabel = new JLabel("Scan UPC:");
-        JPanel topPanel = new JPanel(new BorderLayout());
-        topPanel.add(scanLabel, BorderLayout.WEST);
-        topPanel.add(scanInput, BorderLayout.CENTER);
-
-        finishButton = new JButton("Finish Transaction");
-        finishButton.addActionListener(e -> finishTransaction());
-
-        add(topPanel, BorderLayout.NORTH);
-        add(new JScrollPane(virtualJournal), BorderLayout.CENTER);
-        add(finishButton, BorderLayout.SOUTH);
-
-        setVisible(true);
     }
 
     // Item class for price book
