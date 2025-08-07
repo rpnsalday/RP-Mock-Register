@@ -9,13 +9,16 @@ import java.awt.AWTEvent;
 import java.awt.Toolkit;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import javax.swing.Timer;
 
 public class MockRegister extends JFrame {
     private JTextArea virtualJournal;
     private HashMap<String, Integer> currentTransaction;
     private BigDecimal totalAmount;
     private static final String PRICE_BOOK_FILE = "src/resources/pricebook.tsv";
-    private StringBuilder scanBuffer = new StringBuilder();
+    private final StringBuilder fastBurstBuffer = new StringBuilder();
+    private Timer burstInactivityTimer;
+    private long lastFastCharNanos = 0L;
     private JButton payButton;
     private JButton cancelButton;
     private JButton holdButton;
@@ -24,6 +27,12 @@ public class MockRegister extends JFrame {
     private JButton viewTransactionsButton;
     private JDialog transactionsDialog;
     private JTextArea transactionsTextArea;
+
+    private static final int FAST_GAP_MS = 50;
+    private static final int INACTIVITY_COMMIT_MS = 100;
+    private static final int MIN_SCANNER_LEN = 2;
+    private static final int MAX_SCANNER_LEN = 64;
+
 
     public MockRegister() {
         currentTransaction = new HashMap<>();
@@ -188,35 +197,105 @@ public class MockRegister extends JFrame {
     }
 
     private void setupKeyListener() {
-        // Global key listener for scan gun input
+        // Timer that fires when no more fast characters arrive
+        burstInactivityTimer = new Timer(INACTIVITY_COMMIT_MS, e -> commitFastBurstIfValid());
+        burstInactivityTimer.setRepeats(false);
+
         Toolkit.getDefaultToolkit().addAWTEventListener(new AWTEventListener() {
+            @Override
             public void eventDispatched(AWTEvent event) {
-                if (event instanceof KeyEvent) {
-                    KeyEvent keyEvent = (KeyEvent) event;
-                    if (keyEvent.getID() == KeyEvent.KEY_PRESSED) {
-                        if (keyEvent.getKeyCode() == KeyEvent.VK_ENTER) {
-                            String upc = scanBuffer.toString().trim();
-                            scanBuffer.setLength(0);
-                            
-                            System.out.println("\n[SCAN GUN] Scanning UPC: " + upc);
-                            
-                            Item item = Database.getItem(upc);
-                            if (item != null) {
-                                System.out.println("[SCAN GUN] Item found: " + item.description + " - $" + item.price);
-                                currentTransaction.merge(upc, 1, Integer::sum);
-                                totalAmount = calculateTotal();
-                                updateDisplay();
-                            } else {
-                                System.out.println("[SCAN GUN] ERROR: Item not found for UPC: " + upc);
-                                virtualJournal.append(String.format("\n\nUPC: %sItem not found.\n\n", upc));
-                            }
-                        } else {
-                            scanBuffer.append(keyEvent.getKeyChar());
-                        }
+                if (!(event instanceof KeyEvent)) return;
+                KeyEvent ke = (KeyEvent) event;
+
+                // Use KEY_TYPED to get character data
+                if (ke.getID() != KeyEvent.KEY_TYPED) return;
+
+                char ch = ke.getKeyChar();
+
+                // Ignore non-printable characters except Enter (handled below)
+                boolean isPrintable = ch != KeyEvent.CHAR_UNDEFINED && !Character.isISOControl(ch);
+                boolean isEnter = (ch == '\n' || ch == '\r');
+
+                long now = System.nanoTime();
+
+                // If Enter arrives shortly after fast input, commit immediately
+                if (isEnter) {
+                    if (hasRecentFastInput(now)) {
+                        commitFastBurstIfValid();
+                    } else {
+                        // Enter with no fast context: ignore
+                        clearIfStale(now);
                     }
+                    return;
                 }
+
+                // Accept only typical scanner characters (alphanumeric). Adjust if needed.
+                if (!isPrintable || !(Character.isLetterOrDigit(ch))) {
+                    // Non-eligible char ends any fast burst due to gap classification
+                    clearIfStale(now);
+                    return;
+                }
+
+                // Determine gap w.r.t. last fast char
+                boolean continuesFastBurst = lastFastCharNanos > 0 &&
+                        ((now - lastFastCharNanos) / 1_000_000L) <= FAST_GAP_MS;
+
+                if (!continuesFastBurst) {
+                    // Start a new fast burst (discard previous if pending)
+                    commitFastBurstIfValid(); // this safely does nothing if buffer invalid/empty
+                    fastBurstBuffer.setLength(0);
+                }
+
+                // Append to fast burst
+                if (fastBurstBuffer.length() < MAX_SCANNER_LEN) {
+                    fastBurstBuffer.append(ch);
+                }
+                lastFastCharNanos = now;
+
+                // Restart inactivity timer so we commit shortly after the scan finishes
+                burstInactivityTimer.restart();
             }
         }, AWTEvent.KEY_EVENT_MASK);
+    }
+
+    private boolean hasRecentFastInput(long nowNanos) {
+        if (lastFastCharNanos == 0) return false;
+        long gapMs = (nowNanos - lastFastCharNanos) / 1_000_000L;
+        return gapMs <= INACTIVITY_COMMIT_MS;
+    }
+
+    private void clearIfStale(long nowNanos) {
+        if (!hasRecentFastInput(nowNanos)) {
+            fastBurstBuffer.setLength(0);
+            lastFastCharNanos = 0L;
+            burstInactivityTimer.stop();
+        }
+    }
+
+    private void commitFastBurstIfValid() {
+        if (fastBurstBuffer.length() >= MIN_SCANNER_LEN) {
+            String upc = fastBurstBuffer.toString().trim();
+            fastBurstBuffer.setLength(0);
+            lastFastCharNanos = 0L;
+
+            System.out.println("\n[SCAN GUN] Scanning UPC: " + upc);
+
+            Item item = Database.getItem(upc);
+            if (item != null) {
+                System.out.println("[SCAN GUN] Item found: " + item.description + " - $" + item.price);
+                currentTransaction.merge(upc, 1, Integer::sum);
+                totalAmount = calculateTotal();
+                updateDisplay();
+            } else {
+                System.out.println("[SCAN GUN] ERROR: Item not found for UPC: " + upc);
+                virtualJournal.append(String.format("\n\nUPC: %s\tItem not found.\n\n", upc));
+            }
+        } else {
+            // Not enough fast chars to be a scanner: drop it
+            fastBurstBuffer.setLength(0);
+            lastFastCharNanos = 0L;
+        }
+        burstInactivityTimer.stop();
     }
 
     private void updateDisplay() {
