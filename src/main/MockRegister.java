@@ -4,6 +4,7 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.HashMap;
 import java.awt.AWTEvent;
 import java.awt.Toolkit;
@@ -27,6 +28,7 @@ public class MockRegister extends JFrame {
     private JButton viewTransactionsButton;
     private JDialog transactionsDialog;
     private JTextArea transactionsTextArea;
+    private JButton subtractButton;
 
     private static final int FAST_GAP_MS = 50;
     private static final int INACTIVITY_COMMIT_MS = 100;
@@ -59,40 +61,40 @@ public class MockRegister extends JFrame {
         setSize(800, 700);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
-        
+
         // Set custom look and feel colors
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
         } catch (Exception e) {
             e.printStackTrace();
         }
-        
+
         // Define color scheme
         Color primaryColor = new Color(41, 128, 185); // Blue
         Color secondaryColor = new Color(52, 152, 219); // Lighter blue
         Color accentColor = new Color(231, 76, 60);  // Red for cancel/important actions
         Color backgroundColor = new Color(236, 240, 241); // Light gray background
         Color textColor = new Color(44, 62, 80); // Dark blue-gray for text
-        
+
         // Set frame background
         getContentPane().setBackground(backgroundColor);
-        
+
         // Create a header panel
         JPanel headerPanel = new JPanel(new BorderLayout());
         headerPanel.setBackground(primaryColor);
         headerPanel.setBorder(BorderFactory.createEmptyBorder(10, 15, 10, 15));
-        
+
         JLabel titleLabel = new JLabel("Mock Register");
         titleLabel.setFont(new Font("Arial", Font.BOLD, 24));
         titleLabel.setForeground(Color.WHITE);
         headerPanel.add(titleLabel, BorderLayout.WEST);
-        
+
         // Add current date/time to header
         JLabel dateTimeLabel = new JLabel(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")));
         dateTimeLabel.setFont(new Font("Arial", Font.PLAIN, 14));
         dateTimeLabel.setForeground(Color.WHITE);
         headerPanel.add(dateTimeLabel, BorderLayout.EAST);
-        
+
         // Initialize text area with improved styling
         virtualJournal = new JTextArea();
         virtualJournal.setEditable(false);
@@ -100,19 +102,19 @@ public class MockRegister extends JFrame {
         virtualJournal.setBackground(Color.WHITE);
         virtualJournal.setForeground(textColor);
         virtualJournal.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-        
+
         // Add scroll pane for the journal
         JScrollPane scrollPane = new JScrollPane(virtualJournal);
         scrollPane.setBorder(BorderFactory.createEmptyBorder());
-        
+
         // Create header
         updateDisplay();
-        
+
         // Create styled button panel with better layout
-        JPanel buttonPanel = new JPanel(new GridLayout(2, 3, 10, 10));
+        JPanel buttonPanel = new JPanel(new GridLayout(2, 4, 10, 10));
         buttonPanel.setBackground(backgroundColor);
         buttonPanel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
-        
+
         // Create and style buttons
         payButton = createStyledButton("Pay", primaryColor, Color.WHITE);
         cancelButton = createStyledButton("Cancel Order", accentColor, Color.WHITE);
@@ -120,7 +122,8 @@ public class MockRegister extends JFrame {
         retrieveButton = createStyledButton("Retrieve Order", secondaryColor, Color.WHITE);
         printButton = createStyledButton("Print Receipt", secondaryColor, Color.WHITE);
         viewTransactionsButton = createStyledButton("View Transactions", secondaryColor, Color.WHITE);
-        
+        subtractButton = createStyledButton("Subtract Item", new Color(192, 57, 43), Color.WHITE);
+
         // Add action listeners
         payButton.addActionListener(e -> finishTransaction());
         cancelButton.addActionListener(e -> cancelOrder());
@@ -128,43 +131,46 @@ public class MockRegister extends JFrame {
         retrieveButton.addActionListener(e -> retrieveHeldOrder());
         printButton.addActionListener(e -> printReceipt());
         viewTransactionsButton.addActionListener(e -> showTransactionHistory());
-        
+        subtractButton.addActionListener(e -> voidItem());
+
         // Add buttons to panel
         buttonPanel.add(payButton);
+        buttonPanel.add(subtractButton);
         buttonPanel.add(cancelButton);
         buttonPanel.add(holdButton);
         buttonPanel.add(retrieveButton);
         buttonPanel.add(printButton);
         buttonPanel.add(viewTransactionsButton);
-        
+
+
         // Create a status panel
         JPanel statusPanel = new JPanel(new BorderLayout());
         statusPanel.setBackground(backgroundColor);
         statusPanel.setBorder(BorderFactory.createEmptyBorder(5, 15, 10, 15));
-        
+
         JLabel statusLabel = new JLabel("Ready to scan items");
         statusLabel.setFont(new Font("Arial", Font.ITALIC, 12));
         statusLabel.setForeground(textColor);
         statusPanel.add(statusLabel, BorderLayout.WEST);
-        
+
         // Assemble the UI
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.setBackground(backgroundColor);
         mainPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         mainPanel.add(scrollPane, BorderLayout.CENTER);
-        
+
         JPanel southPanel = new JPanel(new BorderLayout());
         southPanel.setBackground(backgroundColor);
         southPanel.add(buttonPanel, BorderLayout.CENTER);
         southPanel.add(statusPanel, BorderLayout.SOUTH);
-        
+
         add(headerPanel, BorderLayout.NORTH);
         add(mainPanel, BorderLayout.CENTER);
         add(southPanel, BorderLayout.SOUTH);
-        
+
         setVisible(true);
     }
-    
+
     // Helper method to create consistently styled buttons
     private JButton createStyledButton(String text, Color bgColor, Color fgColor) {
         JButton button = new JButton(text);
@@ -176,23 +182,23 @@ public class MockRegister extends JFrame {
         button.setBorderPainted(true);
         button.setContentAreaFilled(true);
         button.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(bgColor.darker(), 1),
-            BorderFactory.createEmptyBorder(8, 15, 8, 15)
+                BorderFactory.createLineBorder(bgColor.darker(), 1),
+                BorderFactory.createEmptyBorder(8, 15, 8, 15)
         ));
-        
+
         // Add hover effect
         button.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseEntered(MouseEvent e) {
                 button.setBackground(bgColor.darker());
             }
-            
+
             @Override
             public void mouseExited(MouseEvent e) {
                 button.setBackground(bgColor);
             }
         });
-        
+
         return button;
     }
 
@@ -299,52 +305,67 @@ public class MockRegister extends JFrame {
     }
 
     private void updateDisplay() {
-        virtualJournal.setText(""); // Clear display
-        
-        // Add store header
-        virtualJournal.append("MOCK REGISTER STORE\n");
-        virtualJournal.append("Transaction: " + 
-            LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) + "\n");
-        virtualJournal.append("\n");
-        
-        // Add headers with proper spacing and styling
-        String headerLine = String.format("%-8s %-50s %-15s %-15s\n",
-            "QTY", "ITEM DESCRIPTION", "PRICE", "SUBTOTAL");
-        virtualJournal.append(headerLine);
-        
-        // Add separator line with double line character
-        virtualJournal.append("=".repeat(90) + "\n");
+        // Calculate amounts
+        BigDecimal subtotal = calculateTotal().setScale(2, RoundingMode.HALF_UP);
+        totalAmount = subtotal; // keep field in sync
+        BigDecimal tax = calculateTax(subtotal);
+        BigDecimal grandTotal = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal taxRatePct = calculateTax(BigDecimal.ONE)
+                .multiply(BigDecimal.valueOf(100))
+                .setScale(2, RoundingMode.HALF_UP);
 
-        // If cart is empty, show message
+        // Build the journal text
+        StringBuilder sb = new StringBuilder();
+        sb.append("MOCK REGISTER STORE\n");
+        sb.append("Transaction: ")
+                .append(LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")))
+                .append("\n\n");
+
+        // Header
+        sb.append(String.format("%-8s %-50s %-15s %-15s\n", "QTY", "ITEM DESCRIPTION", "PRICE", "SUBTOTAL"));
+        sb.append("=".repeat(90)).append("\n");
+
         if (currentTransaction.isEmpty()) {
-            virtualJournal.append("\n\n");
-            virtualJournal.append("          Cart is empty. Scan items to add them to your transaction.\n");
-            virtualJournal.append("\n\n");
+            sb.append("\n\n");
+            sb.append("          Cart is empty. Scan items to add them to your transaction.\n");
+            sb.append("\n\n");
         } else {
-            // Display items with improved formatting
             for (var entry : currentTransaction.entrySet()) {
                 Item item = Database.getItem(entry.getKey());
                 if (item != null) {
-                    BigDecimal subtotal = item.price.multiply(new BigDecimal(entry.getValue()));
-                    virtualJournal.append(String.format("%-8d %-50s $%-14.2f $%-14.2f\n",
-                        entry.getValue(),
-                        truncateString(item.description, 50),
-                        item.price,
-                        subtotal));
+                    BigDecimal lineSubtotal = item.price.multiply(new BigDecimal(entry.getValue()))
+                            .setScale(2, RoundingMode.HALF_UP);
+                    sb.append(String.format("%-8d %-50s $%-14.2f $%-14.2f\n",
+                            entry.getValue(),
+                            truncateString(item.description, 50),
+                            item.price.doubleValue(),
+                            lineSubtotal.doubleValue()));
                 }
             }
         }
 
-        // Add separator before total
-        virtualJournal.append("\n" + "-".repeat(90) + "\n");
-        
-        // Format total with better alignment and styling
-        String totalLine = String.format("%76s $%-12.2f", "TOTAL:", totalAmount);
-        virtualJournal.append(totalLine);
-        
-        // Add footer with instructions
-        virtualJournal.append("\n\n");
-        virtualJournal.append("Scan items to add to cart. Use buttons below to complete transaction.");
+        // Totals
+        sb.append("\n").append("-".repeat(90)).append("\n");
+        sb.append(String.format("%76s $%-12.2f\n", "SUBTOTAL:", subtotal.doubleValue()));
+        sb.append(String.format("%70s (%d%%): $%-12.2f\n", "TAX", taxRatePct.intValue(), tax.doubleValue()));
+        sb.append(String.format("%76s $%-12.2f\n", "TOTAL:", grandTotal.doubleValue()));
+        sb.append("\n\n");
+        sb.append("Scan items to add to cart. Use buttons below to complete transaction.");
+
+        if (virtualJournal != null) {
+            virtualJournal.setText(sb.toString());
+            virtualJournal.setCaretPosition(virtualJournal.getDocument().getLength());
+        }
+
+        boolean hasItems = subtotal.compareTo(BigDecimal.ZERO) > 0;
+
+        if (payButton != null) payButton.setEnabled(hasItems);
+        if (cancelButton != null) cancelButton.setEnabled(hasItems);
+        if (holdButton != null) holdButton.setEnabled(hasItems);
+        if (printButton != null) printButton.setEnabled(hasItems);
+        if (subtractButton != null) subtractButton.setEnabled(hasItems);
+        if (retrieveButton != null) retrieveButton.setEnabled(true);
+        if (viewTransactionsButton != null) viewTransactionsButton.setEnabled(true);
     }
 
     private String truncateString(String input, int maxLength) {
@@ -368,17 +389,17 @@ public class MockRegister extends JFrame {
     private void cancelOrder() {
         if (currentTransaction.isEmpty()) {
             JOptionPane.showMessageDialog(this,
-                "No active transaction to cancel.",
-                "Cancel Order",
-                JOptionPane.INFORMATION_MESSAGE);
+                    "No active transaction to cancel.",
+                    "Cancel Order",
+                    JOptionPane.INFORMATION_MESSAGE);
             return;
         }
-        
+
         int result = JOptionPane.showConfirmDialog(this,
-            "Are you sure you want to cancel this order?",
-            "Cancel Order",
-            JOptionPane.YES_NO_OPTION);
-            
+                "Are you sure you want to cancel this order?",
+                "Cancel Order",
+                JOptionPane.YES_NO_OPTION);
+
         if (result == JOptionPane.YES_OPTION) {
             currentTransaction.clear();
             totalAmount = BigDecimal.ZERO;
@@ -389,64 +410,140 @@ public class MockRegister extends JFrame {
     private void holdOrder() {
         if (currentTransaction.isEmpty()) {
             JOptionPane.showMessageDialog(this,
-                "No active transaction to hold.",
-                "Hold Order",
-                JOptionPane.INFORMATION_MESSAGE);
+                    "No active transaction to hold.",
+                    "Hold Order",
+                    JOptionPane.INFORMATION_MESSAGE);
             return;
         }
-        
+
         long holdId = Database.holdOrder(currentTransaction, totalAmount);
         if (holdId != -1) {
             currentTransaction.clear();
             totalAmount = BigDecimal.ZERO;
             updateDisplay();
             Database.printAllTables();  // Add this line
-            
+
             JOptionPane.showMessageDialog(this,
-                "Order held successfully. Order ID: " + holdId,
-                "Order Held",
-                JOptionPane.INFORMATION_MESSAGE);
+                    "Order held successfully. Order ID: " + holdId,
+                    "Order Held",
+                    JOptionPane.INFORMATION_MESSAGE);
         }
     }
 
     private void retrieveHeldOrder() {
         String input = JOptionPane.showInputDialog(this,
-            "Enter order ID to retrieve:",
-            "Retrieve Held Order",
-            JOptionPane.QUESTION_MESSAGE);
+                "Enter order ID to retrieve:",
+                "Retrieve Held Order",
+                JOptionPane.QUESTION_MESSAGE);
 
         if (input != null && !input.trim().isEmpty()) {
             try {
                 long orderId = Long.parseLong(input.trim());
                 HashMap<String, Integer> items = Database.retrieveHeldOrder(orderId);
-                
+
                 if (!items.isEmpty()) {
                     currentTransaction = items;
                     totalAmount = calculateTotal();
                     updateDisplay();
                     JOptionPane.showMessageDialog(this,
-                        "Order retrieved successfully.",
-                        "Order Retrieved",
-                        JOptionPane.INFORMATION_MESSAGE);
+                            "Order retrieved successfully.",
+                            "Order Retrieved",
+                            JOptionPane.INFORMATION_MESSAGE);
                 } else {
                     JOptionPane.showMessageDialog(this,
-                        "Order not found.",
-                        "Error",
-                        JOptionPane.ERROR_MESSAGE);
+                            "Order not found.",
+                            "Error",
+                            JOptionPane.ERROR_MESSAGE);
                 }
             } catch (NumberFormatException e) {
                 JOptionPane.showMessageDialog(this,
-                    "Please enter a valid number.",
-                    "Error",
-                    JOptionPane.ERROR_MESSAGE);
+                        "Please enter a valid number.",
+                        "Error",
+                        JOptionPane.ERROR_MESSAGE);
             }
         }
+    }
+
+    private void voidItem() {
+        if (currentTransaction.isEmpty()) {
+            JOptionPane.showMessageDialog(this,
+                    "No items in the cart to subtract.",
+                    "Subtract Item",
+                    JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        // Build options: show UPC - Description (qty N)
+        java.util.List<Object> options = new java.util.ArrayList<>();
+        class Option {
+            final String upc;
+            final String label;
+
+            Option(String upc, String label) {
+                this.upc = upc;
+                this.label = label;
+            }
+
+            @Override
+            public String toString() {
+                return label;
+            }
+        }
+
+        for (var entry : currentTransaction.entrySet()) {
+            String upc = entry.getKey();
+            int qty = entry.getValue();
+            Item item = Database.getItem(upc);
+            String desc = (item != null) ? item.description : "(Unknown Item)";
+            String label = String.format("%s - %s (qty %d)", upc, truncateString(desc, 40), qty);
+            options.add(new Option(upc, label));
+        }
+
+        JComboBox<Object> combo = new JComboBox<>(options.toArray());
+        combo.setSelectedIndex(0);
+
+        int result = JOptionPane.showConfirmDialog(
+                this,
+                combo,
+                "Select item to subtract",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+        );
+
+        if (result == JOptionPane.OK_OPTION) {
+            Object sel = combo.getSelectedItem();
+            if (sel instanceof Option) {
+                String upc = ((Option) sel).upc;
+                Integer qty = currentTransaction.get(upc);
+                if (qty != null) {
+                    if (qty > 1) {
+                        currentTransaction.put(upc, qty - 1);
+                    } else {
+                        currentTransaction.remove(upc);
+                    }
+                    totalAmount = calculateTotal();
+                    updateDisplay();
+                }
+            }
+        }
+    }
+
+    private BigDecimal calculateTax(BigDecimal total) {
+        BigDecimal taxRate = BigDecimal.valueOf(0.07);
+        return total.multiply(taxRate).setScale(2, RoundingMode.HALF_UP);
     }
 
     private void printReceipt(BigDecimal amountTendered, BigDecimal change) {
         // Define colors for receipt
         Color receiptBgColor = new Color(255, 253, 245); // Slight cream color for receipt paper
         Color receiptTextColor = new Color(50, 50, 50);  // Dark gray for text
+
+        // Calculate amounts
+        BigDecimal subtotal = totalAmount.setScale(2, RoundingMode.HALF_UP);
+        BigDecimal tax = calculateTax(subtotal);
+        BigDecimal grandTotal = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal taxRatePct = calculateTax(BigDecimal.ONE).multiply(BigDecimal.valueOf(100))
+                .setScale(2, RoundingMode.HALF_UP);
 
         // Create styled receipt
         StringBuilder receipt = new StringBuilder();
@@ -472,20 +569,21 @@ public class MockRegister extends JFrame {
         for (var entry : currentTransaction.entrySet()) {
             Item item = Database.getItem(entry.getKey());
             if (item != null) {
-                BigDecimal subtotal = item.price.multiply(new BigDecimal(entry.getValue()));
+                BigDecimal lineSubtotal = item.price.multiply(new BigDecimal(entry.getValue()))
+                        .setScale(2, RoundingMode.HALF_UP);
                 receipt.append(String.format("%-5d %-40s %10.2f %12.2f\n",
                         entry.getValue(),
                         truncateString(item.description, 40),
                         item.price.doubleValue(),
-                        subtotal.doubleValue()));
+                        lineSubtotal.doubleValue()));
             }
         }
 
-        // Receipt footer
+        // Receipt footer (subtotal, tax, total)
         receipt.append("-".repeat(70)).append("\n");
-        receipt.append(String.format("%58s %12.2f\n", "SUBTOTAL:", totalAmount.doubleValue()));
-        receipt.append(String.format("%58s %12.2f\n", "TAX (0%):", 0.00));
-        receipt.append(String.format("%58s %12.2f\n", "TOTAL:", totalAmount.doubleValue()));
+        receipt.append(String.format("%58s %12.2f\n", "SUBTOTAL:", subtotal.doubleValue()));
+        receipt.append(String.format("%52s (%d%%): %12.2f\n", "TAX", taxRatePct.intValue(), tax.doubleValue()));
+        receipt.append(String.format("%58s %12.2f\n", "TOTAL:", grandTotal.doubleValue()));
         receipt.append("\n");
         receipt.append("Payment Method: CASH\n");
         receipt.append(String.format("Amount Tendered: $%.2f\n", amountTendered.doubleValue()));
@@ -543,29 +641,30 @@ public class MockRegister extends JFrame {
     private void printReceipt() {
         printReceipt(totalAmount, BigDecimal.ZERO);
     }
+
     private void showTransactionHistory() {
         // Define colors for transaction history
         Color primaryColor = new Color(41, 128, 185); // Blue
         Color backgroundColor = new Color(236, 240, 241); // Light gray background
         Color textColor = new Color(44, 62, 80); // Dark blue-gray for text
-        
+
         if (transactionsDialog == null) {
             // Create a styled dialog
             transactionsDialog = new JDialog(this, "Transaction History", false);
             transactionsDialog.setSize(900, 600);
             transactionsDialog.setLayout(new BorderLayout());
             transactionsDialog.getContentPane().setBackground(backgroundColor);
-            
+
             // Create header panel
             JPanel headerPanel = new JPanel(new BorderLayout());
             headerPanel.setBackground(primaryColor);
             headerPanel.setBorder(BorderFactory.createEmptyBorder(10, 15, 10, 15));
-            
+
             JLabel titleLabel = new JLabel("Transaction History");
             titleLabel.setFont(new Font("Arial", Font.BOLD, 20));
             titleLabel.setForeground(Color.WHITE);
             headerPanel.add(titleLabel, BorderLayout.WEST);
-            
+
             // Create styled text area
             transactionsTextArea = new JTextArea();
             transactionsTextArea.setEditable(false);
@@ -573,61 +672,61 @@ public class MockRegister extends JFrame {
             transactionsTextArea.setBackground(Color.WHITE);
             transactionsTextArea.setForeground(textColor);
             transactionsTextArea.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-            
+
             // Create styled scroll pane
             JScrollPane scrollPane = new JScrollPane(transactionsTextArea);
             scrollPane.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-            
+
             // Create button panel
             JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
             buttonPanel.setBackground(backgroundColor);
             buttonPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-            
+
             // Create styled refresh button
             JButton refreshButton = createStyledButton("Refresh", primaryColor, Color.WHITE);
             refreshButton.addActionListener(e -> updateTransactionHistory());
-            
+
             // Create styled close button
             JButton closeButton = createStyledButton("Close", new Color(149, 165, 166), Color.WHITE);
             closeButton.addActionListener(e -> transactionsDialog.setVisible(false));
-            
+
             // Add buttons to panel
             buttonPanel.add(refreshButton);
             buttonPanel.add(closeButton);
-            
+
             // Add components to dialog
             transactionsDialog.add(headerPanel, BorderLayout.NORTH);
             transactionsDialog.add(scrollPane, BorderLayout.CENTER);
             transactionsDialog.add(buttonPanel, BorderLayout.SOUTH);
-            
+
             // Center the dialog relative to the main window
             transactionsDialog.setLocationRelativeTo(this);
         }
-        
+
         // Update and show dialog
         updateTransactionHistory();
         transactionsDialog.setVisible(true);
     }
-    
+
     private void updateTransactionHistory() {
         // Get transaction history from database
         String historyText = Database.getTransactionHistory();
-        
+
         // If empty, show a message
         if (historyText == null || historyText.trim().isEmpty()) {
             transactionsTextArea.setText("No transaction history available.");
             return;
         }
-        
+
         // Format the transaction history with better styling
         StringBuilder formattedHistory = new StringBuilder();
         formattedHistory.append("TRANSACTION HISTORY\n");
         formattedHistory.append("=".repeat(80)).append("\n\n");
         formattedHistory.append(historyText);
-        
+
         // Set the formatted text
         transactionsTextArea.setText(formattedHistory.toString());
-        
+
         // Scroll to the top
         transactionsTextArea.setCaretPosition(0);
     }
@@ -641,41 +740,92 @@ public class MockRegister extends JFrame {
             return;
         }
 
-        BigDecimal amountTendered = null;
+        // Calculate amounts
+        BigDecimal subtotal = totalAmount.setScale(2, RoundingMode.HALF_UP);
+        BigDecimal tax = calculateTax(subtotal);
+        BigDecimal grandTotal = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal taxRatePct = calculateTax(BigDecimal.ONE)
+                .multiply(BigDecimal.valueOf(100))
+                .setScale(2, RoundingMode.HALF_UP);
 
-        // Keep prompting until valid amount is entered
-        while (true) {
-            String input = JOptionPane.showInputDialog(this,
-                    String.format("Total: $%.2f\nEnter amount tendered:", totalAmount),
-                    "Enter Payment",
-                    JOptionPane.QUESTION_MESSAGE);
+        // Ask payment method first
+        String[] options = {"Exact Cash", "Next Dollar", "Custom Amount", "Cancel"};
+        String message = String.format(
+                "Subtotal: $%.2f\nTax (%.2f%%): $%.2f\nTotal: $%.2f\n\nChoose payment method:",
+                subtotal.doubleValue(), taxRatePct.doubleValue(), tax.doubleValue(), grandTotal.doubleValue()
+        );
+        int choice = JOptionPane.showOptionDialog(
+                this,
+                message,
+                "Select Payment Method",
+                JOptionPane.DEFAULT_OPTION,
+                JOptionPane.QUESTION_MESSAGE,
+                null,
+                options,
+                options[0]
+        );
 
-            if (input == null) {
-                // User cancelled
-                return;
-            }
-
-            try {
-                amountTendered = new BigDecimal(input).setScale(2, BigDecimal.ROUND_HALF_UP);
-                if (amountTendered.compareTo(totalAmount) < 0) {
-                    JOptionPane.showMessageDialog(this,
-                            "Amount is less than total. Please enter a valid amount.",
-                            "Invalid Payment",
-                            JOptionPane.WARNING_MESSAGE);
-                    continue;
-                }
-                break;
-            } catch (NumberFormatException e) {
-                JOptionPane.showMessageDialog(this,
-                        "Please enter a valid number.",
-                        "Invalid Input",
-                        JOptionPane.ERROR_MESSAGE);
-            }
+        if (choice == -1 || choice == 3) {
+            // Closed dialog or Cancel
+            return;
         }
 
-        BigDecimal change = amountTendered.subtract(totalAmount);
+        BigDecimal amountTendered = null;
 
-        long transactionId = Database.saveTransaction(currentTransaction, totalAmount);
+        switch (choice) {
+            case 0: // Exact Cash
+                amountTendered = grandTotal;
+                break;
+
+            case 1: // Next Dollar (ceil to next whole dollar)
+                // Ceiling to 0 decimal places, then show as 2 decimals
+                amountTendered = grandTotal.setScale(0, RoundingMode.CEILING).setScale(2, RoundingMode.HALF_UP);
+                break;
+
+            case 2: // Custom Amount
+                while (true) {
+                    String input = JOptionPane.showInputDialog(this,
+                            String.format("Subtotal: $%.2f\nTax (%.2f%%): $%.2f\nTotal: $%.2f\n\nEnter amount tendered:",
+                                    subtotal.doubleValue(),
+                                    taxRatePct.doubleValue(),
+                                    tax.doubleValue(),
+                                    grandTotal.doubleValue()),
+                            "Enter Payment",
+                            JOptionPane.QUESTION_MESSAGE);
+
+                    if (input == null) {
+                        // User cancelled custom input
+                        return;
+                    }
+
+                    try {
+                        amountTendered = new BigDecimal(input).setScale(2, RoundingMode.HALF_UP);
+                        if (amountTendered.compareTo(grandTotal) < 0) {
+                            JOptionPane.showMessageDialog(this,
+                                    "Amount is less than total. Please enter a valid amount.",
+                                    "Invalid Payment",
+                                    JOptionPane.WARNING_MESSAGE);
+                            continue;
+                        }
+                        break;
+                    } catch (NumberFormatException e) {
+                        JOptionPane.showMessageDialog(this,
+                                "Please enter a valid number.",
+                                "Invalid Input",
+                                JOptionPane.ERROR_MESSAGE);
+                    }
+                }
+                break;
+
+            default:
+                // Safety: treat anything unexpected as cancel
+                return;
+        }
+
+        BigDecimal change = amountTendered.subtract(grandTotal).setScale(2, RoundingMode.HALF_UP);
+
+        // Persist the tax-inclusive total as the transaction total
+        long transactionId = Database.saveTransaction(currentTransaction, grandTotal);
         if (transactionId != -1) {
             printReceipt(amountTendered, change);
             currentTransaction.clear();
