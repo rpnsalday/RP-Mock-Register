@@ -11,6 +11,9 @@ import java.awt.Toolkit;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import javax.swing.Timer;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.List;
 
 public class MockRegister extends JFrame {
     private JTextArea virtualJournal;
@@ -20,6 +23,7 @@ public class MockRegister extends JFrame {
     private final StringBuilder fastBurstBuffer = new StringBuilder();
     private Timer burstInactivityTimer;
     private long lastFastCharNanos = 0L;
+    private static final String QUICK_KEY_ACTION_PREFIX = "quickKey.addItem.";
     private JButton payButton;
     private JButton cancelButton;
     private JButton holdButton;
@@ -53,6 +57,8 @@ public class MockRegister extends JFrame {
                 Database.closeConnection();
             }
         });
+
+        setupQuickItemShortcuts();
     }
 
     private void initUI() {
@@ -169,6 +175,57 @@ public class MockRegister extends JFrame {
         add(southPanel, BorderLayout.SOUTH);
 
         setVisible(true);
+    }
+
+    private void setupQuickItemShortcuts() {
+        // Query top-selling items from transactions
+        List<String> topUPCs = Database.getTopSellingUPCs(12);
+
+        if (topUPCs == null || topUPCs.isEmpty()) {
+            // No history yet: do not bind quick keys
+            return;
+        }
+
+        String[] functionKeys = new String[]{"F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"};
+        Map<String, String> keyToCode = new LinkedHashMap<>();
+
+        int count = Math.min(functionKeys.length, topUPCs.size());
+        for (int i = 0; i < count; i++) {
+            keyToCode.put(functionKeys[i], topUPCs.get(i));
+        }
+
+        // Register on root pane so shortcuts work regardless of focus
+        JRootPane root = getRootPane();
+        InputMap im = root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
+        ActionMap am = root.getActionMap();
+
+        keyToCode.forEach((key, code) -> {
+            KeyStroke ks = KeyStroke.getKeyStroke(key);
+            if (ks != null) {
+                String actionName = QUICK_KEY_ACTION_PREFIX + key;
+                im.put(ks, actionName);
+                am.put(actionName, new AbstractAction() {
+                    @Override
+                    public void actionPerformed(ActionEvent e) {
+                        addItemByQuickKey(code);
+                    }
+                });
+            }
+        });
+    }
+
+    private void addItemByQuickKey(String code) {
+        // Clear any stale scanner buffer
+        long now = System.nanoTime();
+        clearIfStale(now);
+
+        // Push the code as if it arrived rapidly from a scanner
+        fastBurstBuffer.setLength(0);
+        fastBurstBuffer.append(code);
+        lastFastCharNanos = now;
+
+        // Immediately try to commit the burst (same validation as real scans)
+        commitFastBurstIfValid();
     }
 
     // Helper method to create consistently styled buttons
@@ -401,6 +458,21 @@ public class MockRegister extends JFrame {
                 JOptionPane.YES_NO_OPTION);
 
         if (result == JOptionPane.YES_OPTION) {
+            // Compute amounts for console logging before clearing
+            BigDecimal subtotal = calculateTotal().setScale(2, RoundingMode.HALF_UP);
+            BigDecimal tax = calculateTax(subtotal);
+            BigDecimal grandTotal = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
+            BigDecimal taxRatePct = calculateTax(BigDecimal.ONE)
+                    .multiply(BigDecimal.valueOf(100))
+                    .setScale(2, RoundingMode.HALF_UP);
+
+            System.out.println("\n=== TRANSACTION CANCELED ===");
+            System.out.printf("Items in cart: %d%n", currentTransaction.size());
+            System.out.printf("Subtotal: $%.2f%n", subtotal.doubleValue());
+            System.out.printf("Tax (%.2f%%): $%.2f%n", taxRatePct.doubleValue(), tax.doubleValue());
+            System.out.printf("Total: $%.2f%n", grandTotal.doubleValue());
+            System.out.println("============================\n");
+
             currentTransaction.clear();
             totalAmount = BigDecimal.ZERO;
             updateDisplay();
@@ -516,12 +588,34 @@ public class MockRegister extends JFrame {
                 String upc = ((Option) sel).upc;
                 Integer qty = currentTransaction.get(upc);
                 if (qty != null) {
+                    Item item = Database.getItem(upc);
+                    String desc = (item != null) ? item.description : "(Unknown Item)";
+
                     if (qty > 1) {
                         currentTransaction.put(upc, qty - 1);
+                        System.out.printf("[ITEM SUBTRACTED] %s (%s): qty %d -> %d%n",
+                                upc, truncateString(desc, 40), qty, qty - 1);
                     } else {
                         currentTransaction.remove(upc);
+                        System.out.printf("[ITEM REMOVED] %s (%s) removed from cart%n",
+                                upc, truncateString(desc, 40));
                     }
+
+                    // Recompute amounts and print important parts
                     totalAmount = calculateTotal();
+                    BigDecimal subtotal = totalAmount.setScale(2, RoundingMode.HALF_UP);
+                    BigDecimal tax = calculateTax(subtotal);
+                    BigDecimal grandTotal = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
+                    BigDecimal taxRatePct = calculateTax(BigDecimal.ONE)
+                            .multiply(BigDecimal.valueOf(100))
+                            .setScale(2, RoundingMode.HALF_UP);
+
+                    System.out.println("---- CART UPDATED ----");
+                    System.out.printf("Subtotal: $%.2f%n", subtotal.doubleValue());
+                    System.out.printf("Tax (%.2f%%): $%.2f%n", taxRatePct.doubleValue(), tax.doubleValue());
+                    System.out.printf("Total: $%.2f%n", grandTotal.doubleValue());
+                    System.out.println("----------------------");
+
                     updateDisplay();
                 }
             }
@@ -533,7 +627,7 @@ public class MockRegister extends JFrame {
         return total.multiply(taxRate).setScale(2, RoundingMode.HALF_UP);
     }
 
-    private void printReceipt(BigDecimal amountTendered, BigDecimal change) {
+    private void printReceipt(BigDecimal amountTendered, BigDecimal change, String paymentMethod) {
         // Define colors for receipt
         Color receiptBgColor = new Color(255, 253, 245); // Slight cream color for receipt paper
         Color receiptTextColor = new Color(50, 50, 50);  // Dark gray for text
@@ -585,7 +679,7 @@ public class MockRegister extends JFrame {
         receipt.append(String.format("%52s (%d%%): %12.2f\n", "TAX", taxRatePct.intValue(), tax.doubleValue()));
         receipt.append(String.format("%58s %12.2f\n", "TOTAL:", grandTotal.doubleValue()));
         receipt.append("\n");
-        receipt.append("Payment Method: CASH\n");
+        receipt.append("Payment Method: ").append(paymentMethod == null ? "CASH" : paymentMethod).append("\n");
         receipt.append(String.format("Amount Tendered: $%.2f\n", amountTendered.doubleValue()));
         receipt.append(String.format("Change: $%.2f\n", change.doubleValue()));
         receipt.append("\n");
@@ -639,7 +733,7 @@ public class MockRegister extends JFrame {
     }
 
     private void printReceipt() {
-        printReceipt(totalAmount, BigDecimal.ZERO);
+        printReceipt(totalAmount, BigDecimal.ZERO, "PENDING");
     }
 
     private void showTransactionHistory() {
@@ -748,86 +842,128 @@ public class MockRegister extends JFrame {
                 .multiply(BigDecimal.valueOf(100))
                 .setScale(2, RoundingMode.HALF_UP);
 
-        // Ask payment method first
-        String[] options = {"Exact Cash", "Next Dollar", "Custom Amount", "Cancel"};
-        String message = String.format(
-                "Subtotal: $%.2f\nTax (%.2f%%): $%.2f\nTotal: $%.2f\n\nChoose payment method:",
-                subtotal.doubleValue(), taxRatePct.doubleValue(), tax.doubleValue(), grandTotal.doubleValue()
-        );
-        int choice = JOptionPane.showOptionDialog(
+        // First: select payment type (Credit Card vs Cash)
+        String[] payTypeOptions = {"Credit Card", "Cash", "Cancel"};
+        int payType = JOptionPane.showOptionDialog(
                 this,
-                message,
-                "Select Payment Method",
+                String.format("Subtotal: $%.2f\nTax (%.2f%%): $%.2f\nTotal: $%.2f\n\nChoose payment type:",
+                        subtotal.doubleValue(), taxRatePct.doubleValue(), tax.doubleValue(), grandTotal.doubleValue()),
+                "Select Payment Type",
                 JOptionPane.DEFAULT_OPTION,
                 JOptionPane.QUESTION_MESSAGE,
                 null,
-                options,
-                options[0]
+                payTypeOptions,
+                payTypeOptions[0]
         );
 
-        if (choice == -1 || choice == 3) {
+        if (payType == -1 || payType == 2) {
             // Closed dialog or Cancel
             return;
         }
 
-        BigDecimal amountTendered = null;
+        BigDecimal amountTendered;
+        BigDecimal change = BigDecimal.ZERO;
+        String paymentMethod;
+        String paymentDetail; // "Exact", "Next Dollar", or "Custom"
 
-        switch (choice) {
-            case 0: // Exact Cash
-                amountTendered = grandTotal;
-                break;
+        if (payType == 0) {
+            // Credit Card: auto-charge exact amount
+            paymentMethod = "CREDIT CARD";
+            paymentDetail = "Exact";
+            amountTendered = grandTotal;
+            change = BigDecimal.ZERO;
+        } else {
+            // Cash: ask for method (Exact, Next Dollar, Custom)
+            paymentMethod = "CASH";
+            String[] options = {"Exact Cash", "Next Dollar", "Custom Amount", "Cancel"};
+            String message = String.format(
+                    "Subtotal: $%.2f\nTax (%.2f%%): $%.2f\nTotal: $%.2f\n\nChoose payment method:",
+                    subtotal.doubleValue(), taxRatePct.doubleValue(), tax.doubleValue(), grandTotal.doubleValue()
+            );
+            int choice = JOptionPane.showOptionDialog(
+                    this,
+                    message,
+                    "Select Cash Option",
+                    JOptionPane.DEFAULT_OPTION,
+                    JOptionPane.QUESTION_MESSAGE,
+                    null,
+                    options,
+                    options[0]
+            );
 
-            case 1: // Next Dollar (ceil to next whole dollar)
-                // Ceiling to 0 decimal places, then show as 2 decimals
-                amountTendered = grandTotal.setScale(0, RoundingMode.CEILING).setScale(2, RoundingMode.HALF_UP);
-                break;
-
-            case 2: // Custom Amount
-                while (true) {
-                    String input = JOptionPane.showInputDialog(this,
-                            String.format("Subtotal: $%.2f\nTax (%.2f%%): $%.2f\nTotal: $%.2f\n\nEnter amount tendered:",
-                                    subtotal.doubleValue(),
-                                    taxRatePct.doubleValue(),
-                                    tax.doubleValue(),
-                                    grandTotal.doubleValue()),
-                            "Enter Payment",
-                            JOptionPane.QUESTION_MESSAGE);
-
-                    if (input == null) {
-                        // User cancelled custom input
-                        return;
-                    }
-
-                    try {
-                        amountTendered = new BigDecimal(input).setScale(2, RoundingMode.HALF_UP);
-                        if (amountTendered.compareTo(grandTotal) < 0) {
-                            JOptionPane.showMessageDialog(this,
-                                    "Amount is less than total. Please enter a valid amount.",
-                                    "Invalid Payment",
-                                    JOptionPane.WARNING_MESSAGE);
-                            continue;
-                        }
-                        break;
-                    } catch (NumberFormatException e) {
-                        JOptionPane.showMessageDialog(this,
-                                "Please enter a valid number.",
-                                "Invalid Input",
-                                JOptionPane.ERROR_MESSAGE);
-                    }
-                }
-                break;
-
-            default:
-                // Safety: treat anything unexpected as cancel
+            if (choice == -1 || choice == 3) {
+                // Closed dialog or Cancel
                 return;
-        }
+            }
 
-        BigDecimal change = amountTendered.subtract(grandTotal).setScale(2, RoundingMode.HALF_UP);
+            switch (choice) {
+                case 0: // Exact Cash
+                    paymentDetail = "Exact";
+                    amountTendered = grandTotal;
+                    break;
+                case 1: // Next Dollar
+                    paymentDetail = "Next Dollar";
+                    amountTendered = grandTotal.setScale(0, RoundingMode.CEILING).setScale(2, RoundingMode.HALF_UP);
+                    break;
+                case 2: // Custom Amount
+                    paymentDetail = "Custom";
+                    BigDecimal inputAmt = null;
+                    while (true) {
+                        String input = JOptionPane.showInputDialog(this,
+                                String.format("Subtotal: $%.2f\nTax (%.2f%%): $%.2f\nTotal: $%.2f\n\nEnter amount tendered:",
+                                        subtotal.doubleValue(),
+                                        taxRatePct.doubleValue(),
+                                        tax.doubleValue(),
+                                        grandTotal.doubleValue()),
+                                "Enter Payment",
+                                JOptionPane.QUESTION_MESSAGE);
+
+                        if (input == null) {
+                            // User cancelled custom input
+                            return;
+                        }
+
+                        try {
+                            inputAmt = new BigDecimal(input).setScale(2, RoundingMode.HALF_UP);
+                            if (inputAmt.compareTo(grandTotal) < 0) {
+                                JOptionPane.showMessageDialog(this,
+                                        "Amount is less than total. Please enter a valid amount.",
+                                        "Invalid Payment",
+                                        JOptionPane.WARNING_MESSAGE);
+                                continue;
+                            }
+                            break;
+                        } catch (NumberFormatException e) {
+                            JOptionPane.showMessageDialog(this,
+                                    "Please enter a valid number.",
+                                    "Invalid Input",
+                                    JOptionPane.ERROR_MESSAGE);
+                        }
+                    }
+                    amountTendered = inputAmt;
+                    break;
+                default:
+                    // Safety
+                    return;
+            }
+            change = amountTendered.subtract(grandTotal).setScale(2, RoundingMode.HALF_UP);
+        }
 
         // Persist the tax-inclusive total as the transaction total
         long transactionId = Database.saveTransaction(currentTransaction, grandTotal);
         if (transactionId != -1) {
-            printReceipt(amountTendered, change);
+            // Console summary of the payment (important parts of the receipt)
+            System.out.println("\n=== PAYMENT CONFIRMED ===");
+            System.out.printf("Transaction ID: %d%n", transactionId);
+            System.out.printf("Method: %s (%s)%n", paymentMethod, paymentDetail);
+            System.out.printf("Subtotal: $%.2f%n", subtotal.doubleValue());
+            System.out.printf("Tax (%.2f%%): $%.2f%n", taxRatePct.doubleValue(), tax.doubleValue());
+            System.out.printf("Total: $%.2f%n", grandTotal.doubleValue());
+            System.out.printf("Amount Tendered: $%.2f%n", amountTendered.doubleValue());
+            System.out.printf("Change: $%.2f%n", change.doubleValue());
+            System.out.println("=========================\n");
+
+            printReceipt(amountTendered, change, paymentMethod);
             currentTransaction.clear();
             totalAmount = BigDecimal.ZERO;
             updateDisplay();

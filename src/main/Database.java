@@ -7,6 +7,9 @@ import java.util.HashMap;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
 
 public class Database {
     private static final String DB_URL = "jdbc:h2:./mock_register_db;AUTO_SERVER=TRUE";
@@ -173,6 +176,29 @@ public class Database {
             e.printStackTrace();
         }
         return -1;
+    }
+
+    public static List<String> getTopSellingUPCs(int limit) {
+        List<String> topUPCs = new ArrayList<>();
+        String sql = """
+            SELECT ti.upc
+            FROM transaction_items ti
+            GROUP BY ti.upc
+            ORDER BY SUM(ti.quantity) DESC
+            LIMIT ?
+        """;
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, Math.max(1, limit));
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    topUPCs.add(rs.getString("upc"));
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return topUPCs;
     }
 
     public static long holdOrder(HashMap<String, Integer> items, BigDecimal totalAmount) {
