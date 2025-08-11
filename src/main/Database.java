@@ -405,6 +405,31 @@ public static void printAllTables() {
         e.printStackTrace();
     }
 }
+
+    public static java.util.Map<String, Integer> getPopularityByUpcFromTransactions() {
+        String sql = """
+                    SELECT ti.upc, COALESCE(SUM(ti.quantity), 0) AS cnt
+                    FROM transaction_items ti
+                    WHERE ti.upc IS NOT NULL
+                    GROUP BY ti.upc
+                """;
+        java.util.Map<String, Integer> result = new java.util.HashMap<>();
+        try (java.sql.Connection conn = getConnection();
+             java.sql.PreparedStatement ps = conn.prepareStatement(sql);
+             java.sql.ResultSet rs = ps.executeQuery()) {
+
+            while (rs.next()) {
+                String upc = rs.getString("upc");
+                int cnt = rs.getInt("cnt");
+                if (upc != null && cnt > 0) {
+                    result.put(upc, cnt);
+                }
+            }
+        } catch (java.sql.SQLException e) {
+            System.err.println("Failed to load popularity from transactions: " + e.getMessage());
+        }
+        return result;
+    }
 public static String getTransactionHistory() {
     StringBuilder history = new StringBuilder();
     try (Connection conn = getConnection()) {

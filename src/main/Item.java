@@ -12,4 +12,12 @@ public class Item {
         this.description = description;
         this.price = price;
     }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public BigDecimal getPrice() {
+        return price;
+    }
 }
