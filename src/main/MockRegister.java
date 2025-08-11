@@ -12,6 +12,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import javax.swing.Timer;
 import java.awt.event.KeyEvent;
+import javax.swing.text.JTextComponent;
 
 
 public class MockRegister extends JFrame {
@@ -33,8 +34,8 @@ public class MockRegister extends JFrame {
     private JTextArea transactionsTextArea;
     private JButton subtractButton;
 
-    private static final int FAST_GAP_MS = 50;
-    private static final int INACTIVITY_COMMIT_MS = 100;
+    private static final int FAST_GAP_MS = 120;
+    private static final int INACTIVITY_COMMIT_MS = 300;
     private static final int MIN_SCANNER_LEN = 2;
     private static final int MAX_SCANNER_LEN = 64;
     private static final String POPULAR_HEADER = "=".repeat(36) + " Popular Shortcuts " + "=".repeat(35);
@@ -43,6 +44,10 @@ public class MockRegister extends JFrame {
     private String cachedPopularSection = null;
     private javax.swing.JTextField manualBarcodeField;
     private javax.swing.JButton manualAddButton;
+    private javax.swing.JButton manualModeButton;
+    private static final String TAG_KEYBOARD = "[KEYBOARD]";
+    private static final String TAG_SCANGUN  = "[SCAN GUN]";
+    private volatile boolean manualMode = false;
 
 
     public MockRegister() {
@@ -116,10 +121,12 @@ public class MockRegister extends JFrame {
         manualLabel.setFont(new Font("Arial", Font.PLAIN, 13));
         manualLabel.setForeground(textColor);
 
+        // Create but do not show the manual text field at startup
         manualBarcodeField = new JTextField();
         manualBarcodeField.setToolTipText("Enter UPC/barcode and press Enter or click Add");
         manualBarcodeField.setColumns(18);
 
+        // Keep an Add button, but we won't show it initially
         manualAddButton = new JButton("Add");
         manualAddButton.setBackground(secondaryColor);
         manualAddButton.setForeground(Color.WHITE);
@@ -127,12 +134,31 @@ public class MockRegister extends JFrame {
         manualAddButton.setFont(new Font("Arial", Font.BOLD, 12));
         manualAddButton.setBorder(BorderFactory.createEmptyBorder(6, 12, 6, 12));
 
+        manualModeButton = createStyledButton("Manual", secondaryColor, Color.WHITE);
+        manualModeButton.setToolTipText("Click to manually enter a UPC/barcode");
+
         manualLabel.setLabelFor(manualBarcodeField);
 
-        // Wire actions
+        // Wire actions for hidden inline field (kept for potential future inline mode)
         ActionListener manualAddAction = e -> addManualBarcode();
         manualBarcodeField.addActionListener(manualAddAction);
         manualAddButton.addActionListener(manualAddAction);
+
+        // New behavior: prompt for input when Manual is pressed
+        manualModeButton.addActionListener(e -> {
+            String code = JOptionPane.showInputDialog(
+                    this,
+                    "Enter UPC/Barcode:",
+                    "Manual Entry",
+                    JOptionPane.PLAIN_MESSAGE
+            );
+            if (code != null) {
+                code = code.trim();
+                if (!code.isEmpty()) {
+                    addManualBarcode(code);
+                }
+            }
+        });
 
         // Optional: ESC clears field
         manualBarcodeField.getInputMap().put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_ESCAPE, 0), "clearField");
@@ -143,19 +169,52 @@ public class MockRegister extends JFrame {
             }
         });
 
-        manualPanel.add(manualLabel, BorderLayout.WEST);
-        manualPanel.add(manualBarcodeField, BorderLayout.CENTER);
-        manualPanel.add(manualAddButton, BorderLayout.EAST);
+        // Right-side container (unused now that Manual is in the button panel)
+        // JPanel manualButtonsPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
+        // manualButtonsPanel.setOpaque(false);
+        // manualButtonsPanel.add(manualModeButton);
+
+        // Do not add the label and text field at initialization to meet requirements
+        // manualPanel.add(manualLabel, BorderLayout.WEST);
+        // manualPanel.add(manualBarcodeField, BorderLayout.CENTER);
+        // manualPanel.add(manualButtonsPanel, BorderLayout.EAST);
+
+        // Keep focus listeners but they won't trigger unless field is shown/focused somewhere else
+        manualBarcodeField.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusGained(java.awt.event.FocusEvent e) {
+                manualMode = true;
+                // Ensure any in-flight scanner buffer is cleared
+                fastBurstBuffer.setLength(0);
+                lastFastCharNanos = 0L;
+            }
+
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                manualMode = false;
+                // Clear any stray collected chars to avoid misclassification
+                fastBurstBuffer.setLength(0);
+                lastFastCharNanos = 0L;
+            }
+        });
+
+        manualBarcodeField.addActionListener(evt -> {
+            addManualBarcode();
+            // Keep focus here for continued manual entry
+            manualBarcodeField.requestFocusInWindow();
+        });
 
         // Wrap header + manual into a single north container
         JPanel northContainer = new JPanel(new BorderLayout());
         northContainer.setBackground(backgroundColor);
         northContainer.add(headerPanel, BorderLayout.NORTH);
-        northContainer.add(manualPanel, BorderLayout.SOUTH);
+        // Manual panel removed from header area; Manual button moved to bottom button panel
+        // northContainer.add(manualPanel, BorderLayout.SOUTH);
 
         // Journal area
         virtualJournal = new JTextArea();
         virtualJournal.setEditable(false);
+        virtualJournal.setFocusable(false); // Critical: prevent focus so scan-gun keystrokes are captured globally
         virtualJournal.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 14));
         virtualJournal.setBackground(Color.WHITE);
         virtualJournal.setForeground(textColor);
@@ -195,6 +254,7 @@ public class MockRegister extends JFrame {
         buttonPanel.add(retrieveButton);
         buttonPanel.add(printButton);
         buttonPanel.add(viewTransactionsButton);
+        buttonPanel.add(manualModeButton);
 
         // Status panel
         JPanel statusPanel = new JPanel(new BorderLayout());
@@ -229,21 +289,27 @@ public class MockRegister extends JFrame {
         javax.swing.SwingUtilities.invokeLater(this::showPopularShortcutsInJournal);
         initializePopularShortcuts();
 
-        // Focus manual field for quick typed entries
-        javax.swing.SwingUtilities.invokeLater(() -> manualBarcodeField.requestFocusInWindow());
+        // Do not auto-focus the manual field. This ensures scan-gun input is not
+        // misclassified as keyboard input by sending keystrokes into the text field.
+        // Users can click the field when they intend to type manually.
+        // javax.swing.SwingUtilities.invokeLater(() -> manualBarcodeField.requestFocusInWindow());
     }
 
-    private void addManualBarcode() {
-        if (manualBarcodeField == null) return;
-        String code = manualBarcodeField.getText();
+    private boolean addManualBarcode(String code) {
+        // Stop any pending scan-burst to avoid accidental commits
+        if (burstInactivityTimer != null && burstInactivityTimer.isRunning()) burstInactivityTimer.stop();
+        fastBurstBuffer.setLength(0);
+        lastFastCharNanos = 0L;
+
         if (code != null) code = code.trim();
 
         if (code == null || code.isEmpty()) {
-            javax.swing.SwingUtilities.invokeLater(() -> manualBarcodeField.requestFocusInWindow());
-            return;
+            if (manualBarcodeField != null) {
+                javax.swing.SwingUtilities.invokeLater(() -> manualBarcodeField.requestFocusInWindow());
+            }
+            return false;
         }
 
-        // Basic sanity checks consistent with scanner handling
         if (code.length() < MIN_SCANNER_LEN || code.length() > MAX_SCANNER_LEN) {
             javax.swing.JOptionPane.showMessageDialog(
                     this,
@@ -251,17 +317,48 @@ public class MockRegister extends JFrame {
                     "Barcode",
                     javax.swing.JOptionPane.WARNING_MESSAGE
             );
-            manualBarcodeField.selectAll();
-            manualBarcodeField.requestFocusInWindow();
-            return;
+            if (manualBarcodeField != null) {
+                manualBarcodeField.selectAll();
+                manualBarcodeField.requestFocusInWindow();
+            }
+            return false;
         }
 
-        // Attempt to add item (reuses existing quick-key path)
-        addItemByQuickKey(code);
+        // Directly process manual code to avoid scan-gun logging path
+        Item item = Database.getItem(code);
+        boolean success = item != null;
+        if (success) {
+            currentTransaction.merge(code, 1, Integer::sum);
+            totalAmount = calculateTotal();
+            updateDisplay();
+            // Console log to clearly mark manual keyboard input
+            System.out.println("\n" + TAG_KEYBOARD + ": " + code);
+            System.out.println(TAG_KEYBOARD + " Item found: " + item.description + " - $" + item.price);
+            if (manualBarcodeField != null) {
+                manualBarcodeField.setText("");
+                javax.swing.SwingUtilities.invokeLater(() -> manualBarcodeField.requestFocusInWindow());
+            }
+            return true;
+        } else {
+            // Provide clear feedback and keep the code so the user can fix it
+            Toolkit.getDefaultToolkit().beep();
+            javax.swing.JOptionPane.showMessageDialog(
+                    this,
+                    "Item not found for code: " + code,
+                    "Not Found",
+                    javax.swing.JOptionPane.INFORMATION_MESSAGE
+            );
+            if (manualBarcodeField != null) {
+                manualBarcodeField.selectAll();
+                manualBarcodeField.requestFocusInWindow();
+            }
+            return false;
+        }
+    }
 
-        // Clear and refocus for fast repeated entries
-        manualBarcodeField.setText("");
-        javax.swing.SwingUtilities.invokeLater(() -> manualBarcodeField.requestFocusInWindow());
+    private boolean addManualBarcode() {
+        if (manualBarcodeField == null) return false;
+        return addManualBarcode(manualBarcodeField.getText());
     }
 
     private void initializePopularShortcuts() {
@@ -640,7 +737,6 @@ public class MockRegister extends JFrame {
     }
 
     private void setupKeyListener() {
-        // Timer that fires when no more fast characters arrive
         burstInactivityTimer = new Timer(INACTIVITY_COMMIT_MS, e -> commitFastBurstIfValid());
         burstInactivityTimer.setRepeats(false);
 
@@ -649,53 +745,60 @@ public class MockRegister extends JFrame {
             public void eventDispatched(AWTEvent event) {
                 if (!(event instanceof KeyEvent)) return;
                 KeyEvent ke = (KeyEvent) event;
-
-                // Use KEY_TYPED to get character data
                 if (ke.getID() != KeyEvent.KEY_TYPED) return;
 
-                char ch = ke.getKeyChar();
+                // Identify context and source
+                Component focusOwner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+                Object src = ke.getSource();
 
-                // Ignore non-printable characters except Enter (handled below)
+                // HARD GUARD: do nothing if the manual field is focused or event originates from a text field
+                if ((manualBarcodeField != null && manualBarcodeField.isFocusOwner())
+                        || (src instanceof JTextComponent)
+                        || (focusOwner instanceof JTextComponent)) {
+                    if (burstInactivityTimer.isRunning()) burstInactivityTimer.stop();
+                    fastBurstBuffer.setLength(0);
+                    lastFastCharNanos = 0L;
+                    return;
+                }
+
+                char ch = ke.getKeyChar();
                 boolean isPrintable = ch != KeyEvent.CHAR_UNDEFINED && !Character.isISOControl(ch);
                 boolean isEnter = (ch == '\n' || ch == '\r');
-
                 long now = System.nanoTime();
 
-                // If Enter arrives shortly after fast input, commit immediately
                 if (isEnter) {
+                    // Never commit a burst from Enter if coming from any text component context
+                    if (src instanceof JTextComponent || focusOwner instanceof JTextComponent) {
+                        if (burstInactivityTimer.isRunning()) burstInactivityTimer.stop();
+                        fastBurstBuffer.setLength(0);
+                        lastFastCharNanos = 0L;
+                        return;
+                    }
                     if (hasRecentFastInput(now)) {
                         commitFastBurstIfValid();
                     } else {
-                        // Enter with no fast context: ignore
                         clearIfStale(now);
                     }
                     return;
                 }
 
-                // Accept only typical scanner characters (alphanumeric). Adjust if needed.
-                if (!isPrintable || !(Character.isLetterOrDigit(ch))) {
-                    // Non-eligible char ends any fast burst due to gap classification
+                if (!isPrintable || !Character.isLetterOrDigit(ch)) {
                     clearIfStale(now);
                     return;
                 }
 
-                // Determine gap w.r.t. last fast char
                 boolean continuesFastBurst = lastFastCharNanos > 0 &&
                         ((now - lastFastCharNanos) / 1_000_000L) <= FAST_GAP_MS;
 
                 if (!continuesFastBurst) {
-                    // Start a new fast burst (discard previous if pending)
-                    commitFastBurstIfValid(); // this safely does nothing if buffer invalid/empty
+                    commitFastBurstIfValid(); // safe no-op if buffer empty/invalid
                     fastBurstBuffer.setLength(0);
                 }
 
-                // Append to fast burst
                 if (fastBurstBuffer.length() < MAX_SCANNER_LEN) {
                     fastBurstBuffer.append(ch);
                 }
                 lastFastCharNanos = now;
-
-                // Restart inactivity timer so we commit shortly after the scan finishes
                 burstInactivityTimer.restart();
             }
         }, AWTEvent.KEY_EVENT_MASK);
@@ -716,21 +819,27 @@ public class MockRegister extends JFrame {
     }
 
     private void commitFastBurstIfValid() {
+        if (manualBarcodeField != null && manualBarcodeField.isFocusOwner()) {
+            fastBurstBuffer.setLength(0);
+            lastFastCharNanos = 0L;
+            return;
+        }
+
         if (fastBurstBuffer.length() >= MIN_SCANNER_LEN) {
             String upc = fastBurstBuffer.toString().trim();
             fastBurstBuffer.setLength(0);
             lastFastCharNanos = 0L;
 
-            System.out.println("\n[SCAN GUN] Scanning UPC: " + upc);
+            System.out.println("\n" + TAG_SCANGUN + ": " + upc);
 
             Item item = Database.getItem(upc);
             if (item != null) {
-                System.out.println("[SCAN GUN] Item found: " + item.description + " - $" + item.price);
+                System.out.println(TAG_SCANGUN + " Item found: " + item.description + " - $" + item.price);
                 currentTransaction.merge(upc, 1, Integer::sum);
                 totalAmount = calculateTotal();
                 updateDisplay();
             } else {
-                System.out.println("[SCAN GUN] ERROR: Item not found for UPC: " + upc);
+                System.out.println(TAG_SCANGUN + " ERROR: Item not found for UPC: " + upc);
                 virtualJournal.append(String.format("\n\nUPC: %s\tItem not found.\n\n", upc));
             }
         } else {
