@@ -13,9 +13,39 @@ import java.time.format.DateTimeFormatter;
 import javax.swing.Timer;
 import java.awt.event.KeyEvent;
 import javax.swing.text.JTextComponent;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 
 
+/**
+ * MockRegister is the main Swing UI for a mock point-of-sale (POS) cash register.
+ * It wires together:
+ * - UI components (journal, buttons, quantity editor)
+ * - Keyboard/scanner input handling (fast burst detection for USB scanners)
+ * - Quick item shortcuts (F1..F12 and dynamic reassignment by popularity)
+ * - Transaction lifecycle (add items, hold/retrieve, cancel, finish, print)
+ * - Persistence via Database (price book, transactions, held orders)
+ *
+ * Important navigation:
+ * - initUI(): builds the layout and components.
+ * - setupKeyListener(): detects and batches fast scanner input vs typing.
+ * - addManualBarcode()/addItemByQuickKey(): item entry points.
+ * - reassignQuickKeysByPopularity()/showPopularShortcutsInJournal(): quick key UX.
+ * - updateDisplay()/refreshQtyEditorPanel(): redraws dynamic UI.
+ * - finishTransaction(): saves to DB and resets state.
+ */
 public class MockRegister extends JFrame {
+    // Fields to keep last applied discounts and computed totals for receipt/console/VJ
+    private java.util.List<DiscountResult.DiscountLine> lastAppliedDiscounts = null;
+    private BigDecimal lastAppliedDiscountTotal = null;
+    private BigDecimal lastSubtotalUsed = null;
+    private BigDecimal lastTaxUsed = null;
+    private BigDecimal lastGrandTotalUsed = null;
     private JTextArea virtualJournal;
     private HashMap<String, Integer> currentTransaction;
     private BigDecimal totalAmount;
@@ -34,6 +64,32 @@ public class MockRegister extends JFrame {
     private JTextArea transactionsTextArea;
     private JButton subtractButton;
 
+    private JPanel qtyPanel;
+    private JScrollPane qtyScrollPane;
+    private java.util.Map<String, JTextField> qtyFields = new java.util.HashMap<>();
+    private boolean suppressQtyEvents = false;
+
+    // Panel showing clickable buttons for popular shortcuts (mirrors F1..F12 assignments)
+    private JPanel shortcutsPanel;
+    private JScrollPane shortcutsScrollPane;
+
+    // Panel showing buttons for all items (3 columns grid) between VJ and Qty editor
+    private JPanel allItemsPanel;
+    // Container with search + pagination controls (no scroll pane)
+    private JPanel allItemsContainer;
+    private JTextField itemsSearchField;
+    private JButton itemsPrevButton;
+    private JButton itemsNextButton;
+    private JLabel itemsPageLabel;
+    private int itemsPageIndex = 0;
+    private int itemsPageSize = 24; // 3 columns x 8 rows default
+
+    /**
+     * Fast-input detection tuning for USB barcode scanners:
+     * - FAST_GAP_MS: max time between characters to still consider them part of a single scan burst.
+     * - INACTIVITY_COMMIT_MS: commit the buffered scan if no new chars arrive within this time.
+     * - MIN/MAX_SCANNER_LEN: sanity bounds for a valid barcode length.
+     */
     private static final int FAST_GAP_MS = 120;
     private static final int INACTIVITY_COMMIT_MS = 300;
     private static final int MIN_SCANNER_LEN = 2;
@@ -47,14 +103,24 @@ public class MockRegister extends JFrame {
     private javax.swing.JButton manualModeButton;
     private static final String TAG_KEYBOARD = "[KEYBOARD]";
     private static final String TAG_SCANGUN  = "[SCAN GUN]";
+    private static final String TAG_BUTTON  = " [BUTTON] ";
     private volatile boolean manualMode = false;
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+    // Endpoint for discount service, now configurable at runtime via UI
+    private String discountEndpoint = System.getProperty("discount.url",
+            System.getenv().getOrDefault("DISCOUNT_URL", "http://gorilla-2-47577909.ap-southeast-2.elb.amazonaws.com/discount/v1"));
+
+    // UI controls for server config
+    private JTextField hostField;
+    private JTextField portField;
+    private JButton setServerButton;
 
 
     public MockRegister() {
         currentTransaction = new HashMap<>();
         totalAmount = BigDecimal.ZERO;
 
-        // Initialize database and load price book
         Database.initializeDatabase();
         Database.loadPriceBook(PRICE_BOOK_FILE);
 
@@ -69,33 +135,36 @@ public class MockRegister extends JFrame {
         });
 
         setupQuickItemShortcuts();
+        setFullScreenSize();
     }
 
+    /**
+     * Builds the main window layout:
+     * - Header with title and clock
+     * - Manual barcode entry controls
+     * - Left: virtual journal (receipt-like log)
+     * - Right: quantity editor for cart lines
+     * - Bottom: action buttons (Pay, Cancel, Hold, Retrieve, Print, History)
+     */
     private void initUI() {
-        // Set application properties
         setTitle("Mock Register");
-        setSize(800, 700);
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
 
-        // Set system look and feel
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
         } catch (Exception e) {
             e.printStackTrace();
         }
 
-        // Define color scheme
         Color primaryColor = new Color(41, 128, 185); // Blue
         Color secondaryColor = new Color(52, 152, 219); // Lighter blue
         Color accentColor = new Color(231, 76, 60);  // Red for cancel/important actions
         Color backgroundColor = new Color(236, 240, 241); // Light gray background
         Color textColor = new Color(44, 62, 80); // Dark blue-gray for text
 
-        // Set frame background
         getContentPane().setBackground(backgroundColor);
 
-        // Header (title + datetime)
         JPanel headerPanel = new JPanel(new BorderLayout());
         headerPanel.setBackground(primaryColor);
         headerPanel.setBorder(BorderFactory.createEmptyBorder(10, 15, 10, 15));
@@ -112,7 +181,6 @@ public class MockRegister extends JFrame {
         dateTimeLabel.setForeground(Color.WHITE);
         headerPanel.add(dateTimeLabel, BorderLayout.EAST);
 
-        // Manual barcode entry (below header)
         JPanel manualPanel = new JPanel(new BorderLayout(6, 0));
         manualPanel.setBorder(BorderFactory.createEmptyBorder(8, 15, 8, 15));
         manualPanel.setBackground(new Color(245, 247, 249));
@@ -121,12 +189,10 @@ public class MockRegister extends JFrame {
         manualLabel.setFont(new Font("Arial", Font.PLAIN, 13));
         manualLabel.setForeground(textColor);
 
-        // Create but do not show the manual text field at startup
         manualBarcodeField = new JTextField();
         manualBarcodeField.setToolTipText("Enter UPC/barcode and press Enter or click Add");
         manualBarcodeField.setColumns(18);
 
-        // Keep an Add button, but we won't show it initially
         manualAddButton = new JButton("Add");
         manualAddButton.setBackground(secondaryColor);
         manualAddButton.setForeground(Color.WHITE);
@@ -139,12 +205,10 @@ public class MockRegister extends JFrame {
 
         manualLabel.setLabelFor(manualBarcodeField);
 
-        // Wire actions for hidden inline field (kept for potential future inline mode)
         ActionListener manualAddAction = e -> addManualBarcode();
         manualBarcodeField.addActionListener(manualAddAction);
         manualAddButton.addActionListener(manualAddAction);
 
-        // New behavior: prompt for input when Manual is pressed
         manualModeButton.addActionListener(e -> {
             String code = JOptionPane.showInputDialog(
                     this,
@@ -160,7 +224,6 @@ public class MockRegister extends JFrame {
             }
         });
 
-        // Optional: ESC clears field
         manualBarcodeField.getInputMap().put(KeyStroke.getKeyStroke(java.awt.event.KeyEvent.VK_ESCAPE, 0), "clearField");
         manualBarcodeField.getActionMap().put("clearField", new AbstractAction() {
             @Override
@@ -169,17 +232,6 @@ public class MockRegister extends JFrame {
             }
         });
 
-        // Right-side container (unused now that Manual is in the button panel)
-        // JPanel manualButtonsPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 0));
-        // manualButtonsPanel.setOpaque(false);
-        // manualButtonsPanel.add(manualModeButton);
-
-        // Do not add the label and text field at initialization to meet requirements
-        // manualPanel.add(manualLabel, BorderLayout.WEST);
-        // manualPanel.add(manualBarcodeField, BorderLayout.CENTER);
-        // manualPanel.add(manualButtonsPanel, BorderLayout.EAST);
-
-        // Keep focus listeners but they won't trigger unless field is shown/focused somewhere else
         manualBarcodeField.addFocusListener(new java.awt.event.FocusAdapter() {
             @Override
             public void focusGained(java.awt.event.FocusEvent e) {
@@ -192,7 +244,6 @@ public class MockRegister extends JFrame {
             @Override
             public void focusLost(java.awt.event.FocusEvent e) {
                 manualMode = false;
-                // Clear any stray collected chars to avoid misclassification
                 fastBurstBuffer.setLength(0);
                 lastFastCharNanos = 0L;
             }
@@ -200,21 +251,79 @@ public class MockRegister extends JFrame {
 
         manualBarcodeField.addActionListener(evt -> {
             addManualBarcode();
-            // Keep focus here for continued manual entry
             manualBarcodeField.requestFocusInWindow();
         });
 
-        // Wrap header + manual into a single north container
         JPanel northContainer = new JPanel(new BorderLayout());
         northContainer.setBackground(backgroundColor);
         northContainer.add(headerPanel, BorderLayout.NORTH);
-        // Manual panel removed from header area; Manual button moved to bottom button panel
-        // northContainer.add(manualPanel, BorderLayout.SOUTH);
 
-        // Journal area
+        // Server configuration panel (Host, Port, Set Server)
+        JPanel serverPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        serverPanel.setBackground(new Color(245, 247, 249));
+        serverPanel.setBorder(BorderFactory.createEmptyBorder(6, 15, 6, 15));
+
+        JLabel hostLabel = new JLabel("Host:");
+        hostField = new JTextField(14);
+        JLabel portLabel = new JLabel("Port:");
+        portField = new JTextField(5);
+        setServerButton = createStyledButton("Connect Log Server", new Color(39, 174, 96), Color.WHITE);
+        setServerButton.setToolTipText("Connect System.out/err to the specified log server");
+
+        // Prefill host/port from LOG_SERVER_* configuration
+        String cfgHost = System.getProperty("log.server.host");
+        if (cfgHost == null || cfgHost.isBlank()) cfgHost = System.getenv("LOG_SERVER_HOST");
+        if (cfgHost == null || cfgHost.isBlank()) cfgHost = "0.0.0.0";
+        String cfgPortStr = System.getProperty("log.server.port");
+        if (cfgPortStr == null || cfgPortStr.isBlank()) cfgPortStr = System.getenv("LOG_SERVER_PORT");
+        int cfgPort = 0;
+        try {
+            if (cfgPortStr != null && !cfgPortStr.isBlank()) cfgPort = Integer.parseInt(cfgPortStr.trim());
+        } catch (NumberFormatException ignore) { cfgPort = 5050; }
+        hostField.setText(cfgHost);
+        portField.setText(String.valueOf(cfgPort));
+
+        setServerButton.addActionListener(evt -> {
+            String h = hostField.getText() != null ? hostField.getText().trim() : "";
+            String pStr = portField.getText() != null ? portField.getText().trim() : "";
+            if (h.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "Host cannot be empty.", "Invalid Host", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            int p;
+            try {
+                p = Integer.parseInt(pStr);
+                if (p < 1 || p > 65535) throw new NumberFormatException("port out of range");
+            } catch (NumberFormatException nfe) {
+                JOptionPane.showMessageDialog(this, "Port must be a number between 1 and 65535.", "Invalid Port", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+
+            // Determine tee-local from env/props
+            boolean teeLocal = false;
+            String teeStr = System.getProperty("log.tee.local");
+            if (teeStr == null || teeStr.isBlank()) teeStr = System.getenv("LOG_TEE_LOCAL");
+            if (teeStr != null) {
+                String v = teeStr.trim().toLowerCase();
+                teeLocal = v.equals("1") || v.equals("true") || v.equals("yes") || v.equals("y");
+            }
+
+            // Connect System.out/err to the specified log server
+            SocketConsoleRedirector.install(h, p, teeLocal);
+            JOptionPane.showMessageDialog(this, "Log server connection attempted:\n" + h + ":" + p + (teeLocal ? " (tee local)" : ""), "Log Server", JOptionPane.INFORMATION_MESSAGE);
+        });
+
+        serverPanel.add(hostLabel);
+        serverPanel.add(hostField);
+        serverPanel.add(portLabel);
+        serverPanel.add(portField);
+        serverPanel.add(setServerButton);
+
+        northContainer.add(serverPanel, BorderLayout.CENTER);
+
         virtualJournal = new JTextArea();
         virtualJournal.setEditable(false);
-        virtualJournal.setFocusable(false); // Critical: prevent focus so scan-gun keystrokes are captured globally
+        virtualJournal.setFocusable(false);
         virtualJournal.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 14));
         virtualJournal.setBackground(Color.WHITE);
         virtualJournal.setForeground(textColor);
@@ -237,7 +346,7 @@ public class MockRegister extends JFrame {
         retrieveButton = createStyledButton("Retrieve Order", secondaryColor, Color.WHITE);
         printButton = createStyledButton("Print Receipt", secondaryColor, Color.WHITE);
         viewTransactionsButton = createStyledButton("View Transactions", secondaryColor, Color.WHITE);
-        subtractButton = createStyledButton("Subtract Item", new Color(192, 57, 43), Color.WHITE);
+        subtractButton = createStyledButton("Void Item", new Color(192, 57, 43), Color.WHITE);
 
         payButton.addActionListener(e -> finishTransaction());
         cancelButton.addActionListener(e -> cancelOrder());
@@ -250,11 +359,11 @@ public class MockRegister extends JFrame {
         buttonPanel.add(payButton);
         buttonPanel.add(subtractButton);
         buttonPanel.add(cancelButton);
+        buttonPanel.add(manualModeButton);
         buttonPanel.add(holdButton);
         buttonPanel.add(retrieveButton);
         buttonPanel.add(printButton);
         buttonPanel.add(viewTransactionsButton);
-        buttonPanel.add(manualModeButton);
 
         // Status panel
         JPanel statusPanel = new JPanel(new BorderLayout());
@@ -270,7 +379,69 @@ public class MockRegister extends JFrame {
         JPanel mainPanel = new JPanel(new BorderLayout());
         mainPanel.setBackground(backgroundColor);
         mainPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-        mainPanel.add(scrollPane, BorderLayout.CENTER);
+
+        // Cluster the Virtual Journal and the All-Items buttons in the center area
+        JPanel centerCluster = new JPanel(new BorderLayout(8, 0));
+        centerCluster.setBackground(backgroundColor);
+        centerCluster.add(scrollPane, BorderLayout.CENTER); // Virtual Journal
+
+        // All items buttons panel (3 columns) + search & pagination (no scroll)
+        allItemsPanel = new JPanel(new GridLayout(0, 3, 6, 6));
+        allItemsPanel.setBackground(Color.WHITE);
+
+        // Top controls: search field and pagination
+        JPanel itemsTopControls = new JPanel(new BorderLayout(6, 6));
+        JPanel searchPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        JLabel searchLbl = new JLabel("Search:");
+        itemsSearchField = new JTextField(23);
+        searchPanel.add(searchLbl);
+        searchPanel.add(itemsSearchField);
+        itemsTopControls.add(searchPanel, BorderLayout.WEST);
+
+        JPanel pagerPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 6));
+        itemsTopControls.add(pagerPanel, BorderLayout.EAST);
+
+        // Container with titled border
+        allItemsContainer = new JPanel(new BorderLayout(6, 6));
+        allItemsContainer.setBorder(BorderFactory.createTitledBorder("Items"));
+        allItemsContainer.add(itemsTopControls, BorderLayout.NORTH);
+        allItemsContainer.add(allItemsPanel, BorderLayout.CENTER);
+        allItemsContainer.setPreferredSize(new Dimension(360, 0));
+        centerCluster.add(allItemsContainer, BorderLayout.EAST);
+
+        // Wire up search and pagination
+        javax.swing.event.DocumentListener dl = new javax.swing.event.DocumentListener() {
+            private void changed() {
+                itemsPageIndex = 0;
+                refreshItemsButtonPanel();
+            }
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+        };
+        itemsSearchField.getDocument().addDocumentListener(dl);
+
+
+        mainPanel.add(centerCluster, BorderLayout.CENTER);
+
+        // Shortcuts button panel on the left (mirrors F1..F12 popular shortcuts)
+        shortcutsPanel = new JPanel(new GridLayout(0, 1, 6, 6));
+        shortcutsPanel.setBackground(Color.WHITE);
+        shortcutsPanel.setBorder(BorderFactory.createTitledBorder("Shortcuts"));
+        shortcutsScrollPane = new JScrollPane(shortcutsPanel);
+        shortcutsScrollPane.setPreferredSize(new Dimension(300, 0));
+        mainPanel.add(shortcutsScrollPane, BorderLayout.WEST);
+
+        // Quantity editor panel on the right
+        qtyPanel = new JPanel(new GridBagLayout());
+        qtyPanel.setBackground(Color.WHITE);
+        qtyPanel.setBorder(BorderFactory.createTitledBorder("Quantities"));
+        qtyScrollPane = new JScrollPane(qtyPanel);
+        qtyScrollPane.setPreferredSize(new Dimension(240, 0));
+        mainPanel.add(qtyScrollPane, BorderLayout.EAST);
+
+        // Build initial quantity fields (empty)
+        refreshQtyEditorPanel();
 
         // South area (buttons + status)
         JPanel southPanel = new JPanel(new BorderLayout());
@@ -288,13 +459,20 @@ public class MockRegister extends JFrame {
         // Populate journal section for popular shortcuts and initialize shortcuts
         javax.swing.SwingUtilities.invokeLater(this::showPopularShortcutsInJournal);
         initializePopularShortcuts();
-
-        // Do not auto-focus the manual field. This ensures scan-gun input is not
-        // misclassified as keyboard input by sending keystrokes into the text field.
-        // Users can click the field when they intend to type manually.
-        // javax.swing.SwingUtilities.invokeLater(() -> manualBarcodeField.requestFocusInWindow());
+        refreshItemsButtonPanel();
     }
 
+    private void setFullScreenSize() {
+        Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
+        setLocation(0, 0);
+        setSize(screen.width, screen.height);
+        setResizable(true);
+    }
+
+    /**
+     * Handles a barcode entered via keyboard/UI (not via scanner listener).
+     * Validates length, looks up item, updates cart and display, with clear feedback.
+     */
     private boolean addManualBarcode(String code) {
         // Stop any pending scan-burst to avoid accidental commits
         if (burstInactivityTimer != null && burstInactivityTimer.isRunning()) burstInactivityTimer.stop();
@@ -365,6 +543,7 @@ public class MockRegister extends JFrame {
         refreshPopularityFromDb();
         reassignQuickKeysByPopularity();
         showPopularShortcutsInJournal();
+        refreshShortcutsButtonPanel();
     }
 
 
@@ -385,6 +564,11 @@ public class MockRegister extends JFrame {
             javax.swing.KeyStroke.getKeyStroke("F12")
     };
 
+    /**
+     * Rebuilds F1..F12 quick item bindings based on transaction popularity.
+     * Stable sorting: popularity desc, then description, then UPC to avoid jitter.
+     * Updates InputMap/ActionMap and mirrors assignments into quickKeysByUpc for journal rendering.
+     */
     private void reassignQuickKeysByPopularity() {
         javax.swing.JRootPane root = getRootPane();
         if (root == null) return;
@@ -394,8 +578,8 @@ public class MockRegister extends JFrame {
         ranked.sort((a, b) -> {
             int cmp = Integer.compare(b.getValue(), a.getValue());
             if (cmp != 0) return cmp;
-            main.Item ia = Database.getItem(a.getKey());
-            main.Item ib = Database.getItem(b.getKey());
+            Item ia = Database.getItem(a.getKey());
+            Item ib = Database.getItem(b.getKey());
             String da = ia != null ? ia.description : "";
             String db = ib != null ? ib.description : "";
             cmp = da.compareToIgnoreCase(db);
@@ -443,15 +627,27 @@ public class MockRegister extends JFrame {
 
             quickKeysByUpc.put(upc, java.util.List.of(ks));
         }
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            showPopularShortcutsInJournal();
+            refreshShortcutsButtonPanel();
+        });
     }
 
+    /**
+     * Initial (on startup) quick item bindings from historical top sellers.
+     * This seeds F1..F12 before any new popularity data is collected in-session.
+     * Also triggers the journal section to show current shortcut assignments.
+     */
     private void setupQuickItemShortcuts() {
         quickKeysByUpc.clear();
 
         java.util.List<String> topUPCs = Database.getTopSellingUPCs(12);
         if (topUPCs == null || topUPCs.isEmpty() || getRootPane() == null) {
-            // Still refresh the journal so it shows “no shortcut” state cleanly
-            javax.swing.SwingUtilities.invokeLater(this::showPopularShortcutsInJournal);
+            // Still refresh the journal and shortcuts panel so it shows “no shortcut” state cleanly
+            javax.swing.SwingUtilities.invokeLater(() -> {
+                showPopularShortcutsInJournal();
+                refreshShortcutsButtonPanel();
+            });
             return;
         }
 
@@ -492,7 +688,10 @@ public class MockRegister extends JFrame {
             quickKeysByUpc.computeIfAbsent(upc, __ -> new java.util.ArrayList<>()).add(ks);
         }
 
-        javax.swing.SwingUtilities.invokeLater(this::showPopularShortcutsInJournal);
+        javax.swing.SwingUtilities.invokeLater(() -> {
+            showPopularShortcutsInJournal();
+            refreshShortcutsButtonPanel();
+        });
     }
 
     private void collectAllComponents(java.awt.Component root, java.util.List<java.awt.Component> out) {
@@ -504,6 +703,11 @@ public class MockRegister extends JFrame {
             }
         }
     }
+    /**
+     * Renders a human-readable section at the top of the virtual journal that lists
+     * the most popular quick shortcuts. It prefixes each item with its primary F-key
+     * label (e.g., [F1]) when available and keeps the section cached for stable UI updates.
+     */
     private void showPopularShortcutsInJournal() {
         // Build the popular shortcuts section text
         StringBuilder psb = new StringBuilder();
@@ -512,7 +716,6 @@ public class MockRegister extends JFrame {
         if (quickKeysByUpc == null || quickKeysByUpc.isEmpty()) {
             psb.append("No shortcuts configured.\n");
         } else {
-            // Helper: resolve the F-key index for a keystroke (F1 -> 0, ..., F12 -> 11; non-F -> 999)
             java.util.function.ToIntFunction<javax.swing.KeyStroke> fIndex = ks -> {
                 for (int i = 0; i < FUNCTION_KEYS.length; i++) {
                     if (FUNCTION_KEYS[i].equals(ks)) return i;
@@ -539,8 +742,8 @@ public class MockRegister extends JFrame {
                 // Stable tie-breaker by description then UPC
                 String upc1 = e1.getKey();
                 String upc2 = e2.getKey();
-                main.Item iA = Database.getItem(upc1);
-                main.Item iB = Database.getItem(upc2);
+                Item iA = Database.getItem(upc1);
+                Item iB = Database.getItem(upc2);
                 String dA = iA != null ? iA.description : "";
                 String dB = iB != null ? iB.description : "";
                 cmp = dA.compareToIgnoreCase(dB);
@@ -548,7 +751,6 @@ public class MockRegister extends JFrame {
                 return upc1.compareTo(upc2);
             });
 
-            // Print in F1 -> F12 order (by the sort above), prefixing the first F-key label
             for (var entry : entries) {
                 String upc = entry.getKey();
 
@@ -604,6 +806,228 @@ public class MockRegister extends JFrame {
             virtualJournal.setText(merged);
             virtualJournal.setCaretPosition(virtualJournal.getDocument().getLength());
         }
+    }
+
+    private void refreshShortcutsButtonPanel() {
+        if (shortcutsPanel == null) return;
+        shortcutsPanel.removeAll();
+
+        java.util.List<java.util.Map.Entry<String, java.util.List<javax.swing.KeyStroke>>> entries =
+                (quickKeysByUpc == null) ? java.util.List.of() : new java.util.ArrayList<>(quickKeysByUpc.entrySet());
+
+        java.util.function.ToIntFunction<javax.swing.KeyStroke> fIndex = ks -> {
+            for (int i = 0; i < FUNCTION_KEYS.length; i++) {
+                if (FUNCTION_KEYS[i].equals(ks)) return i;
+            }
+            return 999;
+        };
+
+        entries.sort((e1, e2) -> {
+            int i1 = 999, i2 = 999;
+            if (e1.getValue() != null && !e1.getValue().isEmpty()) {
+                for (javax.swing.KeyStroke ks : e1.getValue()) i1 = Math.min(i1, fIndex.applyAsInt(ks));
+            }
+            if (e2.getValue() != null && !e2.getValue().isEmpty()) {
+                for (javax.swing.KeyStroke ks : e2.getValue()) i2 = Math.min(i2, fIndex.applyAsInt(ks));
+            }
+            int cmp = Integer.compare(i1, i2);
+            if (cmp != 0) return cmp;
+
+            String upc1 = e1.getKey();
+            String upc2 = e2.getKey();
+            Item iA = Database.getItem(upc1);
+            Item iB = Database.getItem(upc2);
+            String dA = iA != null ? iA.description : "";
+            String dB = iB != null ? iB.description : "";
+            cmp = dA.compareToIgnoreCase(dB);
+            if (cmp != 0) return cmp;
+            return upc1.compareTo(upc2);
+        });
+
+        if (entries.isEmpty()) {
+            shortcutsPanel.setLayout(new BorderLayout());
+            JLabel lbl = new JLabel("No shortcuts configured.");
+            lbl.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+            shortcutsPanel.add(lbl, BorderLayout.NORTH);
+        } else {
+            shortcutsPanel.setLayout(new GridLayout(0, 1, 6, 6));
+            for (var entry : entries) {
+                String upc = entry.getKey();
+                Item item = Database.getItem(upc);
+                String desc = (item != null) ? truncateString(item.description, 32) : "(Unknown Item)";
+
+                String primaryFLabel = null;
+                java.util.List<javax.swing.KeyStroke> strokes = entry.getValue();
+                if (strokes != null && !strokes.isEmpty()) {
+                    int bestIdx = 999;
+                    for (javax.swing.KeyStroke ks : strokes) {
+                        for (int j = 0; j < FUNCTION_KEYS.length; j++) {
+                            if (FUNCTION_KEYS[j].equals(ks)) {
+                                if (j < bestIdx) {
+                                    bestIdx = j;
+                                    primaryFLabel = "F" + (j + 1);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                String btnText = (primaryFLabel != null ? "[" + primaryFLabel + "] " : "") + desc;
+                JButton btn = createStyledButton(btnText, new Color(52, 152, 219), Color.WHITE);
+                btn.setHorizontalAlignment(SwingConstants.LEFT);
+                btn.setToolTipText(((item != null) ? item.description : upc) + " (" + upc + ")");
+                btn.addActionListener(e -> addItemByQuickKey(upc));
+                shortcutsPanel.add(btn);
+            }
+        }
+
+        shortcutsPanel.revalidate();
+        shortcutsPanel.repaint();
+    }
+
+    // Builds/refreshes the grid of item buttons (3 columns) using all items from DB
+    private void refreshItemsButtonPanel() {
+        if (allItemsPanel == null) return;
+        allItemsPanel.removeAll();
+
+        java.util.List<Item> items = Database.getAllItems();
+        if (items == null) items = java.util.List.of();
+
+        // Apply search filter (by description or UPC)
+        String q = (itemsSearchField != null && itemsSearchField.getText() != null)
+                ? itemsSearchField.getText().trim().toLowerCase()
+                : "";
+        if (!q.isEmpty()) {
+            java.util.List<Item> filtered = new java.util.ArrayList<>();
+            for (Item it : items) {
+                String d = it.description != null ? it.description.toLowerCase() : "";
+                String u = it.upc != null ? it.upc.toLowerCase() : "";
+                if (d.contains(q) || u.contains(q)) filtered.add(it);
+            }
+            items = filtered;
+        }
+
+        int totalItems = items.size();
+        if (totalItems == 0) {
+            allItemsPanel.setLayout(new BorderLayout());
+            JLabel lbl = new JLabel("No items available.");
+            lbl.setBorder(BorderFactory.createEmptyBorder(6, 8, 6, 8));
+            allItemsPanel.add(lbl, BorderLayout.NORTH);
+            if (itemsPageLabel != null) itemsPageLabel.setText("Page 0 of 0");
+            if (itemsPrevButton != null) itemsPrevButton.setEnabled(false);
+            if (itemsNextButton != null) itemsNextButton.setEnabled(false);
+        } else {
+            // Limit to 7 rows maximum (21 buttons per page)
+            int maxButtonsPerPage = 21;
+            if (itemsPageSize > maxButtonsPerPage) itemsPageSize = maxButtonsPerPage;
+
+            // Recalculate pagination with new page size limit
+            int totalPages = (int) Math.ceil(totalItems / (double) itemsPageSize);
+            if (itemsPageIndex >= totalPages) itemsPageIndex = Math.max(0, totalPages - 1);
+            int start = itemsPageIndex * itemsPageSize;
+            int end = Math.min(start + itemsPageSize, totalItems);
+
+            // Use GridLayout with maximum 7 rows
+            allItemsPanel.setLayout(new GridLayout(7, 3, 6, 6));
+
+            for (int i = start; i < end; i++) {
+                Item item = items.get(i);
+                String text = item.description != null ? item.description : "";
+
+                // Create properly wrapped text for button
+                String wrappedText = wrapTextForButton(text, 12); // 12 chars per line approximately
+
+                JButton btn = createStyledButton(wrappedText, new Color(149, 165, 166), Color.WHITE);
+
+                // Set fixed button size
+                btn.setPreferredSize(new Dimension(120, 80));
+                btn.setMinimumSize(new Dimension(120, 80));
+                btn.setMaximumSize(new Dimension(120, 80));
+
+                btn.setToolTipText(item.description + " (" + item.upc + ")");
+                String upc = item.upc;
+                btn.addActionListener(e -> addItemByButton(upc));
+                allItemsPanel.add(btn);
+            }
+
+            // Fill remaining grid spaces with invisible panels to maintain layout
+            int buttonsAdded = end - start;
+            int remainingSpaces = maxButtonsPerPage - buttonsAdded;
+            for (int i = 0; i < remainingSpaces; i++) {
+                JPanel filler = new JPanel();
+                filler.setVisible(false);
+                allItemsPanel.add(filler);
+            }
+
+            // Update pagination controls
+            if (itemsPageLabel != null) {
+                itemsPageLabel.setText("Page " + (itemsPageIndex + 1) + " of " + totalPages);
+            }
+            if (itemsPrevButton != null) {
+                itemsPrevButton.setEnabled(itemsPageIndex > 0);
+            }
+            if (itemsNextButton != null) {
+                itemsNextButton.setEnabled(itemsPageIndex < totalPages - 1);
+            }
+        }
+        allItemsPanel.revalidate();
+        allItemsPanel.repaint();
+    }
+
+    // Helper method to wrap text properly for buttons
+    private String wrapTextForButton(String text, int maxCharsPerLine) {
+        if (text == null || text.trim().isEmpty()) {
+            return "";
+        }
+
+        text = text.trim();
+        if (text.length() <= maxCharsPerLine) {
+            return "<html><center>" + text + "</center></html>";
+        }
+
+        StringBuilder wrapped = new StringBuilder("<html><center>");
+        String[] words = text.split("\\s+");
+        StringBuilder currentLine = new StringBuilder();
+
+        for (String word : words) {
+            if (currentLine.length() + word.length() + 1 <= maxCharsPerLine) {
+                if (currentLine.length() > 0) {
+                    currentLine.append(" ");
+                }
+                currentLine.append(word);
+            } else {
+                if (currentLine.length() > 0) {
+                    wrapped.append(currentLine.toString()).append("<br>");
+                    currentLine = new StringBuilder(word);
+                } else {
+                    // Single word longer than max chars - truncate it
+                    wrapped.append(word.substring(0, Math.min(word.length(), maxCharsPerLine - 3))).append("...<br>");
+                }
+            }
+        }
+
+        if (currentLine.length() > 0) {
+            wrapped.append(currentLine.toString());
+        }
+
+        wrapped.append("</center></html>");
+        return wrapped.toString();
+    }
+
+    // Adds item to cart specifically via button press and logs with TAG_BUTTON
+    private void addItemByButton(String upc) {
+        if (upc == null || upc.isBlank()) return;
+        Item item = Database.getItem(upc);
+        if (item == null) {
+            Toolkit.getDefaultToolkit().beep();
+            System.out.println(TAG_BUTTON + " ERROR: Item not found for UPC: " + upc);
+            return;
+        }
+        currentTransaction.merge(upc, 1, Integer::sum);
+        totalAmount = calculateTotal();
+        updateDisplay(true);
+        System.out.println("\n" + TAG_BUTTON + ": " + upc);
+        System.out.println(TAG_BUTTON + " Item added: " + item.description + " - $" + item.price);
     }
 
     private String replacePopularSection(String text, String newSection) {
@@ -736,6 +1160,14 @@ public class MockRegister extends JFrame {
         return button;
     }
 
+    /**
+     * Global AWT key listener that distinguishes between human typing and USB barcode scanner input.
+     * Strategy:
+     * - Ignore all key events when a text component is focused (to avoid hijacking manual input).
+     * - Accumulate only alphanumeric printable chars into a short-lived buffer.
+     * - If inter-key gap <= FAST_GAP_MS, we treat it as part of the same "scan burst".
+     * - Commit the buffered UPC when Enter arrives during a burst or after INACTIVITY_COMMIT_MS of silence.
+     */
     private void setupKeyListener() {
         burstInactivityTimer = new Timer(INACTIVITY_COMMIT_MS, e -> commitFastBurstIfValid());
         burstInactivityTimer.setRepeats(false);
@@ -818,6 +1250,11 @@ public class MockRegister extends JFrame {
         }
     }
 
+    /**
+     * Commits the buffered scanner input if it looks like a valid barcode.
+     * Drops the buffer if too short or if manual entry is focused.
+     * Resolves the item, updates the cart, and refreshes the UI.
+     */
     private void commitFastBurstIfValid() {
         if (manualBarcodeField != null && manualBarcodeField.isFocusOwner()) {
             fastBurstBuffer.setLength(0);
@@ -922,6 +1359,9 @@ public class MockRegister extends JFrame {
             virtualJournal.setCaretPosition(virtualJournal.getDocument().getLength());
         }
 
+        // Refresh the quantity editor to reflect current items and amounts
+        refreshQtyEditorPanel();
+
         boolean hasItems = subtotal.compareTo(BigDecimal.ZERO) > 0;
 
         if (payButton != null) payButton.setEnabled(hasItems);
@@ -933,6 +1373,104 @@ public class MockRegister extends JFrame {
         if (viewTransactionsButton != null) viewTransactionsButton.setEnabled(true);
     }
 
+    // Build or refresh the right-side quantity editor panel
+    private void refreshQtyEditorPanel() {
+        if (qtyPanel == null) return;
+        suppressQtyEvents = true;
+        qtyFields.clear();
+        qtyPanel.removeAll();
+
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        gbc.insets = new Insets(4, 6, 4, 6);
+        gbc.anchor = GridBagConstraints.WEST;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+
+        // Header row
+        JLabel hdrItem = new JLabel("Item");
+        hdrItem.setFont(hdrItem.getFont().deriveFont(Font.BOLD));
+        qtyPanel.add(hdrItem, gbc);
+        gbc.gridx = 1;
+        JLabel hdrQty = new JLabel("Qty");
+        hdrQty.setFont(hdrQty.getFont().deriveFont(Font.BOLD));
+        qtyPanel.add(hdrQty, gbc);
+
+        // Collect and sort items for stable order (by description then UPC)
+        java.util.List<String> upcs = new java.util.ArrayList<>(currentTransaction.keySet());
+        upcs.sort((a, b) -> {
+            Item ia = Database.getItem(a);
+            Item ib = Database.getItem(b);
+            String da = ia != null && ia.description != null ? ia.description : "";
+            String db = ib != null && ib.description != null ? ib.description : "";
+            int cmp = da.compareToIgnoreCase(db);
+            if (cmp != 0) return cmp;
+            return a.compareTo(b);
+        });
+
+        for (String upc : upcs) {
+            Integer qty = currentTransaction.get(upc);
+            Item item = Database.getItem(upc);
+            String label = item != null ? truncateString(item.description, 22) : upc;
+
+            gbc.gridy++;
+            gbc.gridx = 0;
+            JLabel itemLbl = new JLabel(label);
+            qtyPanel.add(itemLbl, gbc);
+
+            gbc.gridx = 1;
+            JTextField tf = new JTextField(String.valueOf(qty != null ? qty : 0), 4);
+            tf.putClientProperty("upc", upc);
+            tf.setHorizontalAlignment(SwingConstants.RIGHT);
+            // On Enter, apply value
+            tf.addActionListener(e -> applyQtyChange((String) tf.getClientProperty("upc"), tf.getText()));
+
+            qtyFields.put(upc, tf);
+            qtyPanel.add(tf, gbc);
+        }
+
+        // Filler to push components to top
+        gbc.gridy++;
+        gbc.gridx = 0;
+        gbc.gridwidth = 2;
+        gbc.weighty = 1.0;
+        gbc.fill = GridBagConstraints.BOTH;
+        qtyPanel.add(Box.createVerticalGlue(), gbc);
+
+        qtyPanel.revalidate();
+        qtyPanel.repaint();
+        suppressQtyEvents = false;
+    }
+
+    private void applyQtyChange(String upc, String text) {
+        if (suppressQtyEvents) return;
+        if (upc == null) return;
+        text = text != null ? text.trim() : "";
+        int newQty;
+        try {
+            newQty = Integer.parseInt(text);
+        } catch (NumberFormatException ex) {
+            // Revert the field to the current value
+            Integer cur = currentTransaction.get(upc);
+            JTextField tf = qtyFields.get(upc);
+            if (tf != null) tf.setText(String.valueOf(cur != null ? cur : 0));
+            Toolkit.getDefaultToolkit().beep();
+            return;
+        }
+
+        if (newQty <= 0) {
+            currentTransaction.remove(upc);
+            System.out.println("Item [" + upc + "] has been voided");
+
+        } else {
+            currentTransaction.put(upc, newQty);
+            System.out.println("Quantity for Item [" + upc + "] has been changed to " + newQty);
+        }
+        totalAmount = calculateTotal();
+        updateDisplay();
+    }
+
     private String truncateString(String input, int maxLength) {
         if (input.length() <= maxLength) {
             return input;
@@ -940,6 +1478,10 @@ public class MockRegister extends JFrame {
         return input.substring(0, maxLength - 3) + "...";
     }
 
+    /**
+     * Computes the untaxed subtotal by summing price * quantity for items in the cart.
+     * Uses Database.getItem(upc) to resolve current price from the price book.
+     */
     private BigDecimal calculateTotal() {
         BigDecimal total = BigDecimal.ZERO;
         for (var entry : currentTransaction.entrySet()) {
@@ -1030,16 +1572,28 @@ public class MockRegister extends JFrame {
     }
 
     private void retrieveHeldOrder() {
-        String input = JOptionPane.showInputDialog(this,
-                "Enter order ID to retrieve:",
-                "Retrieve Held Order",
-                JOptionPane.QUESTION_MESSAGE);
+        java.util.List<Database.HeldOrderInfo> held = Database.listHeldOrders();
+        if (held.isEmpty()) {
+            JOptionPane.showMessageDialog(this,
+                    "There are no held orders to retrieve.",
+                    "Retrieve Held Order",
+                    JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
 
-        if (input != null && !input.trim().isEmpty()) {
-            try {
-                long orderId = Long.parseLong(input.trim());
-                HashMap<String, Integer> items = Database.retrieveHeldOrder(orderId);
-
+        JComboBox<Database.HeldOrderInfo> combo = new JComboBox<>(held.toArray(new Database.HeldOrderInfo[0]));
+        combo.setSelectedIndex(0);
+        int result = JOptionPane.showConfirmDialog(
+                this,
+                combo,
+                "Select a held order to retrieve",
+                JOptionPane.OK_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+        );
+        if (result == JOptionPane.OK_OPTION) {
+            Database.HeldOrderInfo sel = (Database.HeldOrderInfo) combo.getSelectedItem();
+            if (sel != null) {
+                HashMap<String, Integer> items = Database.retrieveHeldOrder(sel.id);
                 if (!items.isEmpty()) {
                     currentTransaction = items;
                     totalAmount = calculateTotal();
@@ -1050,15 +1604,10 @@ public class MockRegister extends JFrame {
                             JOptionPane.INFORMATION_MESSAGE);
                 } else {
                     JOptionPane.showMessageDialog(this,
-                            "Order not found.",
+                            "Order could not be retrieved (it may have been removed).",
                             "Error",
                             JOptionPane.ERROR_MESSAGE);
                 }
-            } catch (NumberFormatException e) {
-                JOptionPane.showMessageDialog(this,
-                        "Please enter a valid number.",
-                        "Error",
-                        JOptionPane.ERROR_MESSAGE);
             }
         }
     }
@@ -1067,7 +1616,7 @@ public class MockRegister extends JFrame {
         if (currentTransaction.isEmpty()) {
             JOptionPane.showMessageDialog(this,
                     "No items in the cart to subtract.",
-                    "Subtract Item",
+                    "Void Item",
                     JOptionPane.INFORMATION_MESSAGE);
             return;
         }
@@ -1118,15 +1667,10 @@ public class MockRegister extends JFrame {
                     Item item = Database.getItem(upc);
                     String desc = (item != null) ? item.description : "(Unknown Item)";
 
-                    if (qty > 1) {
-                        currentTransaction.put(upc, qty - 1);
-                        System.out.printf("[ITEM SUBTRACTED] %s (%s): qty %d -> %d%n",
-                                upc, truncateString(desc, 40), qty, qty - 1);
-                    } else {
-                        currentTransaction.remove(upc);
-                        System.out.printf("[ITEM REMOVED] %s (%s) removed from cart%n",
-                                upc, truncateString(desc, 40));
-                    }
+                    // New behavior: remove all quantity for the selected item
+                    currentTransaction.remove(upc);
+                    System.out.printf("[ITEM REMOVED] %s (%s) removed from cart (all quantity voided)%n",
+                            upc, truncateString(desc, 40));
 
                     // Recompute amounts and print important parts
                     totalAmount = calculateTotal();
@@ -1159,10 +1703,10 @@ public class MockRegister extends JFrame {
         Color receiptBgColor = new Color(255, 253, 245); // Slight cream color for receipt paper
         Color receiptTextColor = new Color(50, 50, 50);  // Dark gray for text
 
-        // Calculate amounts
-        BigDecimal subtotal = totalAmount.setScale(2, RoundingMode.HALF_UP);
-        BigDecimal tax = calculateTax(subtotal);
-        BigDecimal grandTotal = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
+        // Calculate amounts (prefer the last computed amounts during finishTransaction)
+        BigDecimal subtotal = (lastSubtotalUsed != null) ? lastSubtotalUsed : totalAmount.setScale(2, RoundingMode.HALF_UP);
+        BigDecimal tax = (lastTaxUsed != null) ? lastTaxUsed : calculateTax(subtotal);
+        BigDecimal grandTotal = (lastGrandTotalUsed != null) ? lastGrandTotalUsed : subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
         BigDecimal taxRatePct = calculateTax(BigDecimal.ONE).multiply(BigDecimal.valueOf(100))
                 .setScale(2, RoundingMode.HALF_UP);
 
@@ -1200,6 +1744,18 @@ public class MockRegister extends JFrame {
             }
         }
 
+        // Discounts section (if applied)
+        if (lastAppliedDiscounts != null && !lastAppliedDiscounts.isEmpty()) {
+            receipt.append("\n");
+            receipt.append("Discounts Applied\n");
+            for (DiscountResult.DiscountLine dl : lastAppliedDiscounts) {
+                BigDecimal amt = (dl.amount == null ? BigDecimal.ZERO : dl.amount.abs());
+                receipt.append(String.format("  %-56s -%s\n", truncateString(dl.description, 50), amt.toPlainString()));
+            }
+            BigDecimal discTotal = (lastAppliedDiscountTotal != null) ? lastAppliedDiscountTotal : BigDecimal.ZERO;
+            receipt.append(String.format("%58s -%.2f\n", "TOTAL DISCOUNT:", discTotal.setScale(2, RoundingMode.HALF_UP).doubleValue()));
+        }
+
         // Receipt footer (subtotal, tax, total)
         receipt.append("-".repeat(70)).append("\n");
         receipt.append(String.format("%58s %12.2f\n", "SUBTOTAL:", subtotal.doubleValue()));
@@ -1225,7 +1781,7 @@ public class MockRegister extends JFrame {
 
         // Create styled scroll pane
         JScrollPane scrollPane = new JScrollPane(receiptArea);
-        scrollPane.setPreferredSize(new Dimension(500, 500));
+        scrollPane.setPreferredSize(new Dimension(800, 500));
         scrollPane.setBorder(BorderFactory.createLineBorder(new Color(200, 200, 200)));
 
         // Create custom dialog for receipt
@@ -1361,7 +1917,20 @@ public class MockRegister extends JFrame {
         transactionsTextArea.setCaretPosition(0);
     }
 
+    /**
+     * Completes the sale:
+     * - Prompts for payment method and amount.
+     * - Computes tax, change, and persists the transaction.
+     * - Prints receipt and resets UI state.
+     * - Refreshes quick-key popularity from the database to keep shortcuts relevant.
+     */
     private void finishTransaction() {
+            // Reset last discount/total context at the start of a new payment flow
+            lastAppliedDiscounts = null;
+            lastAppliedDiscountTotal = null;
+            lastSubtotalUsed = null;
+            lastTaxUsed = null;
+            lastGrandTotalUsed = null;
         java.util.Map<String, Integer> snapshot = new java.util.HashMap<>(currentTransaction);
         if (totalAmount.compareTo(BigDecimal.ZERO) <= 0) {
             JOptionPane.showMessageDialog(this,
@@ -1378,6 +1947,156 @@ public class MockRegister extends JFrame {
         BigDecimal taxRatePct = calculateTax(BigDecimal.ONE)
                 .multiply(BigDecimal.valueOf(100))
                 .setScale(2, RoundingMode.HALF_UP);
+
+        // Ask to apply discounts before proceeding with payment
+        int apply = JOptionPane.showConfirmDialog(
+                this,
+                "Apply available discounts before payment?",
+                "Discounts",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE
+        );
+        if (apply == JOptionPane.YES_OPTION) {
+            DiscountResult r = applyDiscountsViaService();
+            if (r == null) {
+                JOptionPane.showMessageDialog(this, "Discount service unavailable. Proceeding without discounts.", "Discounts", JOptionPane.WARNING_MESSAGE);
+            } else {
+                boolean hasDiscounts = (r.totalDiscount != null && r.totalDiscount.compareTo(BigDecimal.ZERO) != 0)
+                        || (r.lineItems != null && !r.lineItems.isEmpty());
+                if (!hasDiscounts) {
+                    JOptionPane.showMessageDialog(this,
+                            "No discounts available for these items. Proceeding without discounts.",
+                            "Discounts",
+                            JOptionPane.INFORMATION_MESSAGE);
+                } else {
+                    String[] dOpts = {"Apply All", "Choose...", "Skip"};
+                    int dChoice = JOptionPane.showOptionDialog(
+                            this,
+                            "Discounts were found. Apply all discounts, choose specific ones, or skip?",
+                            "Discounts",
+                            JOptionPane.DEFAULT_OPTION,
+                            JOptionPane.QUESTION_MESSAGE,
+                            null,
+                            dOpts,
+                            dOpts[0]
+                    );
+
+                    if (dChoice == 0) {
+                        // Apply all discounts
+                        subtotal = r.discountedTotal.setScale(2, RoundingMode.HALF_UP);
+                        tax = calculateTax(subtotal);
+                        grandTotal = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
+
+                        // Track and log discounts
+                        lastAppliedDiscounts = (r.lineItems != null) ? new java.util.ArrayList<>(r.lineItems) : null;
+                        // Ensure positive discount total for display
+                        lastAppliedDiscountTotal = (r.totalDiscount != null) ? r.totalDiscount.abs() : BigDecimal.ZERO;
+                        lastSubtotalUsed = subtotal;
+                        lastTaxUsed = tax;
+                        lastGrandTotalUsed = grandTotal;
+
+                        // Console log and VJ update
+                        if (lastAppliedDiscounts != null && !lastAppliedDiscounts.isEmpty()) {
+                            System.out.println("== DISCOUNTS APPLIED (All) ==");
+                            StringBuilder sbVj = new StringBuilder();
+                            System.out.println("Total discount: " + lastAppliedDiscountTotal.toPlainString());
+                            System.out.println("New subtotal: " + lastSubtotalUsed.toPlainString());
+                            sbVj.append("Total discount: ").append(lastAppliedDiscountTotal.toPlainString()).append("\n");
+                        }
+                    } else if (dChoice == 1) {
+                        java.util.List<DiscountResult.DiscountLine> lines = r.lineItems;
+                        if (lines == null || lines.isEmpty()) {
+                            JOptionPane.showMessageDialog(this,
+                                    "No selectable discounts available.",
+                                    "Discounts",
+                                    JOptionPane.INFORMATION_MESSAGE);
+                        } else {
+                            DefaultListModel<String> model = new DefaultListModel<>();
+                            for (DiscountResult.DiscountLine dl : lines) {
+                                model.addElement(dl.description + " (" + dl.amount.toPlainString() + ")");
+                            }
+                            JList<String> list = new JList<>(model);
+                            list.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+                            JScrollPane sp = new JScrollPane(list);
+                            sp.setPreferredSize(new Dimension(350, 150));
+
+                            while (true) {
+                                int res = JOptionPane.showConfirmDialog(
+                                        this,
+                                        sp,
+                                        "Select Discounts (Ctrl/Cmd-click for multiple)",
+                                        JOptionPane.OK_CANCEL_OPTION,
+                                        JOptionPane.PLAIN_MESSAGE
+                                );
+                                if (res != JOptionPane.OK_OPTION) {
+                                    // User pressed Cancel or closed dialog; do not apply any selected discounts
+                                    break;
+                                }
+                                int[] idx = list.getSelectedIndices();
+                                if (idx == null || idx.length == 0) {
+                                    JOptionPane.showMessageDialog(
+                                            this,
+                                            "Please select at least one discount or press Cancel.",
+                                            "Select Discounts",
+                                            JOptionPane.WARNING_MESSAGE
+                                    );
+                                    // Re-open the selection dialog to enforce a choice
+                                    continue;
+                                }
+
+                                BigDecimal selectedTotal = BigDecimal.ZERO;
+                                java.util.List<DiscountResult.DiscountLine> selectedLines = new java.util.ArrayList<>();
+
+                                // Sum chosen discounts and capture lines
+                                for (int i : idx) {
+                                    DiscountResult.DiscountLine dl = lines.get(i);
+                                    BigDecimal amt = (dl.amount == null ? BigDecimal.ZERO : dl.amount.abs());
+                                    selectedTotal = selectedTotal.add(amt);
+                                    DiscountResult.DiscountLine copy = new DiscountResult.DiscountLine();
+                                    copy.description = dl.description;
+                                    copy.amount = amt;
+                                    selectedLines.add(copy);
+                                }
+
+                                BigDecimal newSubtotal = subtotal.subtract(selectedTotal);
+                                if (newSubtotal.signum() < 0) {
+                                    newSubtotal = BigDecimal.ZERO;
+                                }
+
+                                subtotal = newSubtotal.setScale(2, RoundingMode.HALF_UP);
+                                tax = calculateTax(subtotal).setScale(2, RoundingMode.HALF_UP);
+                                grandTotal = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
+
+                                // Track applied selection for receipt/console/VJ
+                                lastAppliedDiscounts = selectedLines;
+                                lastAppliedDiscountTotal = selectedTotal;
+                                lastSubtotalUsed = subtotal;
+                                lastTaxUsed = tax;
+                                lastGrandTotalUsed = grandTotal;
+
+                                // Console and VJ logs
+                                System.out.println("== DISCOUNTS APPLIED (Selected) ==");
+                                for (DiscountResult.DiscountLine dl2 : selectedLines) {
+                                    System.out.println("  " + dl2.description + " -" + dl2.amount.toPlainString());
+                                }
+                                System.out.println("Total discount: " + selectedTotal.toPlainString());
+                                System.out.println("New subtotal: " + lastSubtotalUsed.toPlainString());
+                                // Successfully applied selection; exit loop
+                                break;
+                            }
+                        }
+                    } else {
+                        // Skip: do nothing
+                    }
+                }
+
+            }
+        }
+
+        // Ensure last-used totals are set (even if no discounts were applied)
+        if (lastSubtotalUsed == null) lastSubtotalUsed = subtotal;
+        if (lastTaxUsed == null) lastTaxUsed = tax;
+        if (lastGrandTotalUsed == null) lastGrandTotalUsed = grandTotal;
 
         // First: select payment type (Credit Card vs Cash)
         String[] payTypeOptions = {"Credit Card", "Cash", "Cancel"};
@@ -1511,7 +2230,15 @@ public class MockRegister extends JFrame {
                         lineSubtotal.doubleValue());
             }
 
+            BigDecimal discountToShow = (lastAppliedDiscountTotal != null) ? lastAppliedDiscountTotal : BigDecimal.ZERO;
+            if (discountToShow.compareTo(BigDecimal.ZERO) > 0) {
+                System.out.printf("Discounts: -$%.2f%n", discountToShow.doubleValue());
+            } else {
+                System.out.println("Discounts: $0.00");
+            }
+
             System.out.printf("Subtotal: $%.2f%n", subtotal.doubleValue());
+
             System.out.printf("Tax (%.2f%%): $%.2f%n", taxRatePct.doubleValue(), tax.doubleValue());
             System.out.printf("Total: $%.2f%n", grandTotal.doubleValue());
             System.out.printf("Amount Tendered: $%.2f%n", amountTendered.doubleValue());
@@ -1534,5 +2261,85 @@ public class MockRegister extends JFrame {
 
         // Rebuild and cache the static popular section now that assignments changed
         javax.swing.SwingUtilities.invokeLater(this::showPopularShortcutsInJournal);
+    }
+
+    private DiscountResult applyDiscountsViaService() {
+        try {
+            // Build JSON: { "items": [ { upc, description, unitPrice, quantity }, ... ] }
+            ObjectNode root = JSON.createObjectNode();
+            ArrayNode items = root.putArray("items");
+
+            for (var e : currentTransaction.entrySet()) {
+                String upc = e.getKey();
+                int qty = e.getValue();
+                if (qty <= 0) continue;
+
+                Item item = Database.getItem(upc);
+                if (item == null) continue;
+
+                ObjectNode it = items.addObject();
+                it.put("upc", upc);
+                it.put("description", item.getDescription());
+                it.put("unitPrice", item.getPrice()); // Jackson will handle BigDecimal
+                it.put("quantity", qty);
+            }
+
+            HttpRequest req = HttpRequest.newBuilder()
+                    .uri(URI.create(discountEndpoint))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(root)))
+                    .build();
+
+            HttpClient http = HttpClient.newHttpClient();
+            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+
+            if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
+                // Parse response: { discounts:[{description,amount}], totalDiscount, discountedTotal }
+                ObjectNode r = (ObjectNode) JSON.readTree(resp.body());
+                DiscountResult result = new DiscountResult();
+                result.totalDiscount = new BigDecimal(r.get("totalDiscount").asText());
+                result.discountedTotal = new BigDecimal(r.get("discountedTotal").asText());
+
+                var arr = r.withArray("discounts");
+                StringBuilder lines = new StringBuilder();
+                java.util.List<DiscountResult.DiscountLine> parsed = new java.util.ArrayList<>();
+                for (int i = 0; i < arr.size(); i++) {
+                    var d = (ObjectNode) arr.get(i);
+                    String desc = d.get("description").asText();
+                    String amtStr = d.get("amount").asText();
+                    BigDecimal amt = new BigDecimal(amtStr);
+                    if (amt.compareTo(BigDecimal.ZERO) != 0) {
+                        lines.append(desc)
+                                .append(" ")
+                                .append(amtStr)
+                                .append("\n");
+                        DiscountResult.DiscountLine line = new DiscountResult.DiscountLine();
+                        line.description = desc;
+                        line.amount = amt;
+                        parsed.add(line);
+                    }
+                }
+                result.lines = lines.toString();
+                result.lineItems = parsed;
+                return result;
+            } else {
+                System.err.println("Discount service error: HTTP " + resp.statusCode() + " -> " + resp.body());
+            }
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+        return null;
+    }
+
+    // Small holder for discount results
+    private static final class DiscountResult {
+        static final class DiscountLine {
+            String description;
+            BigDecimal amount;
+        }
+        BigDecimal totalDiscount;
+        BigDecimal discountedTotal;
+        String lines; // legacy string for quick journal output
+        java.util.List<DiscountLine> lineItems; // parsed individual discounts
     }
 }

@@ -2,6 +2,10 @@ package main;
 
 import java.math.BigDecimal;
 
+/**
+ * Simple item model representing one row in the price book.
+ * Holds immutable UPC, description and unit price used by the UI and DB.
+ */
 public class Item {
     public String upc;
     public String description;

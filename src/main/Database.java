@@ -9,14 +9,49 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.sql.Timestamp;
 
 
+/**
+ * Database layer for the mock register, backed by an embedded H2 database.
+ * Responsibilities:
+ * - Schema creation and single shared Connection lifecycle (getConnection/closeConnection).
+ * - Loading the price book TSV into price_book table (idempotent on empty table).
+ * - Persisting transactions and held orders with item lines and subtotals.
+ * - Querying top-selling UPCs and transaction history for UI features.
+ */
 public class Database {
     private static final String DB_URL = "jdbc:h2:./mock_register_db;AUTO_SERVER=TRUE";
     private static final String USER = "sa";
     private static final String PASS = "";
     private static Connection connection;
 
+    /** Simple DTO for held orders list */
+    public static class HeldOrderInfo {
+        public final long id;
+        public final Timestamp holdDate;
+        public final BigDecimal totalAmount;
+        public final int itemCount;
+        public HeldOrderInfo(long id, Timestamp holdDate, BigDecimal totalAmount, int itemCount) {
+            this.id = id;
+            this.holdDate = holdDate;
+            this.totalAmount = totalAmount;
+            this.itemCount = itemCount;
+        }
+        @Override
+        public String toString() {
+            String dateStr = (holdDate != null) ? holdDate.toString() : "";
+            return String.format("Order #%d - %s - %d item%s - Total $%.2f",
+                    id, dateStr, itemCount, (itemCount == 1 ? "" : "s"),
+                    (totalAmount == null ? BigDecimal.ZERO : totalAmount));
+        }
+    }
+
+    /**
+     * Returns a shared app-wide Connection to H2. Reopens it if closed.
+     * Using a single connection keeps things simple for a desktop app and allows
+     * us to reduce connection churn while still being safe in this single-user context.
+     */
     public static synchronized Connection getConnection() throws SQLException {
         if (connection == null || connection.isClosed()) {
             connection = DriverManager.getConnection(DB_URL, USER, PASS);
@@ -24,6 +59,9 @@ public class Database {
         return connection;
     }
 
+    /**
+     * Initializes the schema on first run; safe to call multiple times due to IF NOT EXISTS.
+     */
     public static void initializeDatabase() {
         try {
             Connection conn = getConnection();
@@ -92,6 +130,10 @@ public class Database {
     }
 
     // Modify all other methods to use getConnection() instead of creating new connections
+    /**
+     * Loads the TSV price book into the DB if price_book is empty. Uses batch inserts
+     * and a single transaction for performance. Lines with invalid prices are skipped.
+     */
     public static void loadPriceBook(String filename) {
         try (Connection conn = DriverManager.getConnection(DB_URL, USER, PASS)) {
             conn.setAutoCommit(false);
@@ -149,6 +191,10 @@ public class Database {
         }
     }
 
+    /**
+     * Persists a transaction header and its item lines in a single transaction.
+     * Returns the generated transaction id or -1 on failure.
+     */
     public static long saveTransaction(HashMap<String, Integer> items, BigDecimal totalAmount) {
         try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
@@ -178,6 +224,10 @@ public class Database {
         return -1;
     }
 
+    /**
+     * Returns up to [limit] UPCs ranked by total quantity sold, descending.
+     * Used to seed F-key quick shortcuts and the popular section in the journal.
+     */
     public static List<String> getTopSellingUPCs(int limit) {
         List<String> topUPCs = new ArrayList<>();
         String sql = """
@@ -201,6 +251,10 @@ public class Database {
         return topUPCs;
     }
 
+    /**
+     * Saves a "held" order that can be retrieved later. Returns hold id or -1.
+     * Held orders are separate from transactions until they are completed.
+     */
     public static long holdOrder(HashMap<String, Integer> items, BigDecimal totalAmount) {
         try (Connection conn = getConnection()) {
             conn.setAutoCommit(false);
@@ -226,6 +280,9 @@ public class Database {
         return -1;
     }
 
+    /**
+     * Loads a held order and deletes it afterwards (consuming retrieval semantics).
+     */
     public static HashMap<String, Integer> retrieveHeldOrder(long orderId) {
         HashMap<String, Integer> items = new HashMap<>();
         try (Connection conn = getConnection()) {
@@ -245,6 +302,36 @@ public class Database {
             e.printStackTrace();
         }
         return items;
+    }
+
+    /**
+     * Returns held orders for selection with item count.
+     */
+    public static List<HeldOrderInfo> listHeldOrders() {
+        List<HeldOrderInfo> list = new ArrayList<>();
+        String sql = """
+            SELECT h.id, h.hold_date, h.total_amount,
+                   COALESCE(SUM(i.quantity), 0) AS item_count
+            FROM held_orders h
+            LEFT JOIN held_order_items i ON i.held_order_id = h.id
+            GROUP BY h.id, h.hold_date, h.total_amount
+            ORDER BY h.hold_date DESC, h.id DESC
+        """;
+        try (Connection conn = getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                list.add(new HeldOrderInfo(
+                        rs.getLong("id"),
+                        rs.getTimestamp("hold_date"),
+                        rs.getBigDecimal("total_amount"),
+                        rs.getInt("item_count")
+                ));
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+        return list;
     }
 
     private static void saveTransactionItems(Connection conn, long transactionId, HashMap<String, Integer> items) throws SQLException {
@@ -305,6 +392,10 @@ public class Database {
         conn.createStatement().execute("DELETE FROM held_orders WHERE id = " + orderId);
     }
 
+    /**
+     * Looks up an Item (UPC, description, price) from the price_book.
+     * Returns null if not found.
+     */
     public static Item getItem(String upc) {
         try {
             Connection conn = getConnection();
@@ -327,6 +418,9 @@ public class Database {
     }
 
     // Add a cleanup method to close the connection when the application exits
+    /**
+     * Closes the shared DB connection. Called on window close.
+     */
     public static void closeConnection() {
         if (connection != null) {
             try {
@@ -337,6 +431,9 @@ public class Database {
         }
     }
 
+/**
+ * Convenience method for console debugging: dumps all tables.
+ */
 public static void printAllTables() {
     try (Connection conn = DriverManager.getConnection(DB_URL, USER, PASS)) {
         System.out.println("\n=== PRICE BOOK ===");
@@ -406,6 +503,9 @@ public static void printAllTables() {
     }
 }
 
+    /**
+     * Aggregates total quantities sold per UPC to power quick-key popularity.
+     */
     public static java.util.Map<String, Integer> getPopularityByUpcFromTransactions() {
         String sql = """
                     SELECT ti.upc, COALESCE(SUM(ti.quantity), 0) AS cnt
@@ -430,6 +530,9 @@ public static void printAllTables() {
         }
         return result;
     }
+/**
+ * Returns a formatted, human-readable transaction history used by the UI dialog.
+ */
 public static String getTransactionHistory() {
     StringBuilder history = new StringBuilder();
     try (Connection conn = getConnection()) {
@@ -484,5 +587,24 @@ private static String truncateString(String input, int maxLength) {
     if (input == null) return "";
     if (input.length() <= maxLength) return input;
     return input.substring(0, maxLength - 3) + "...";
+}
+
+public static java.util.List<Item> getAllItems() {
+    java.util.List<Item> items = new java.util.ArrayList<>();
+    String sql = "SELECT upc, description, price FROM price_book ORDER BY LOWER(description), upc";
+    try (java.sql.Connection conn = getConnection();
+         java.sql.PreparedStatement ps = conn.prepareStatement(sql);
+         java.sql.ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+            items.add(new Item(
+                    rs.getString("upc"),
+                    rs.getString("description"),
+                    rs.getBigDecimal("price")
+            ));
+        }
+    } catch (java.sql.SQLException e) {
+        System.err.println("Failed to load all items: " + e.getMessage());
+    }
+    return items;
 }
 }
